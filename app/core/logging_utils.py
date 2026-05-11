@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from app.domain_types import PredictionInputBatch, TrackingFrameResult
+from app.core.domain_types import PredictionInputBatch, TrackingFrameResult
 
 
 def write_tracking_csv(results: list[TrackingFrameResult], csv_path: Path) -> None:

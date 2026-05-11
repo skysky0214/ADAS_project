@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from math import hypot
 
-from app.domain_types import PedestrianDetection
+from app.core.domain_types import PedestrianDetection
 
 
 def euclidean_distance(

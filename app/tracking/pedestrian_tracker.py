@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List
 
-from app.domain_types import HistoryPoint, PedestrianDetection, TrackedPedestrian
+from app.core.domain_types import HistoryPoint, PedestrianDetection, TrackedPedestrian
 from app.tracking.matcher import euclidean_distance
 
 
@@ -51,6 +51,12 @@ class PedestrianTracker:
                     track_id=self._next_track_id,
                     x=det.x,
                     y=det.y,
+                    z=det.z,
+                    score=det.score,
+                    dx=det.dx,
+                    dy=det.dy,
+                    dz=det.dz,
+                    heading=det.heading,
                     history=[
                         HistoryPoint(
                             frame_id=frame_id,
@@ -85,9 +91,15 @@ class PedestrianTracker:
                 track_id=matched_id,
                 x=det.x,
                 y=det.y,
+                z=det.z,
                 vx=vx,
                 vy=vy,
                 missed=0,
+                score=det.score,
+                dx=det.dx,
+                dy=det.dy,
+                dz=det.dz,
+                heading=det.heading,
                 history=history,
             )
             updated[matched_id] = _TrackState(track=track)
@@ -103,9 +115,15 @@ class PedestrianTracker:
                         track_id=state.track.track_id,
                         x=state.track.x,
                         y=state.track.y,
+                        z=state.track.z,
                         vx=state.track.vx,
                         vy=state.track.vy,
                         missed=missed,
+                        score=state.track.score,
+                        dx=state.track.dx,
+                        dy=state.track.dy,
+                        dz=state.track.dz,
+                        heading=state.track.heading,
                         history=state.track.history,
                     )
                 )

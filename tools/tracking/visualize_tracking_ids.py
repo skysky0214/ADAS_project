@@ -4,9 +4,20 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 
+"""
+python tools/tracking/visualize_tracking_ids.py \
+  artifacts/rosbag_dsvt_tracking_smoke/tracking_results.json \
+  --save-gif artifacts/rosbag_dsvt_tracking_smoke/tracking_ids.gif \
+  --interval-ms 500 \
+  --tail 10
+"""
 
 def load_tracking_results(json_path: Path) -> list[dict]:
     return json.loads(json_path.read_text(encoding="utf-8"))
@@ -35,7 +46,7 @@ def replay_tracking_ids(
         raise ValueError("No tracking frames found")
 
     histories = _collect_track_histories(frames)
-    colors = plt.cm.get_cmap("tab10", max(10, len(histories)))
+    colors = plt.get_cmap("tab10", max(10, len(histories)))
 
     fig, ax = plt.subplots(figsize=(8, 6))
 

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import List
-
-from app.domain_types import PredictedTrajectory, TrajectoryPoint, TrackedObject
+from app.core.domain_types import PredictedTrajectory, TrajectoryPoint, TrackedPedestrian
 from app.prediction.base import PredictionModel
 
 
@@ -18,8 +16,8 @@ class PlaceholderPredictionModel(PredictionModel):
         self.horizon_sec = horizon_sec
         self.step_sec = step_sec
 
-    def predict(self, tracked_objects: List[TrackedObject]) -> List[PredictedTrajectory]:
-        trajectories: List[PredictedTrajectory] = []
+    def predict(self, tracked_objects: list[TrackedPedestrian]) -> list[PredictedTrajectory]:
+        trajectories: list[PredictedTrajectory] = []
 
         for obj in tracked_objects:
             points = []
@@ -29,16 +27,16 @@ class PlaceholderPredictionModel(PredictionModel):
                 points.append(
                     TrajectoryPoint(
                         t_sec=t_sec,
-                        x=obj.x + (obj.vx * idx),
-                        y=obj.y + (obj.vy * idx),
+                        x=obj.x + (obj.vx * t_sec),
+                        y=obj.y + (obj.vy * t_sec),
                     )
                 )
             trajectories.append(
                 PredictedTrajectory(
                     track_id=obj.track_id,
-                    label=obj.label,
-                    confidence=min(0.95, max(0.3, obj.score)),
                     points=points,
+                    confidence=0.5,
+                    model_name="linear_placeholder",
                 )
             )
 

@@ -28,7 +28,22 @@ frame input
 
 이 단계가 먼저 안정되어야 이후 prediction 모델 입력도 자연스럽게 정의할 수 있다.
 
-## 3. Design choice
+## 3. Workspace layout
+
+현재 workspace는 기능을 찾기 쉽게 아래처럼 나눈다.
+
+- `app/core/`: config, domain types, output helpers
+- `app/pipeline/`: demo frame source와 runtime pipeline 조립
+- `app/perception/`: perception boundary, placeholder, pedestrian filtering, future adapters
+- `app/tracking/`: pedestrian ID tracking
+- `app/prediction/`: prediction input builder, placeholder model boundary, SR-LSTM 후보 코드
+- `app/bridge/`: planner-facing interface 후보
+- `tools/`: replay, conversion, export, visualization scripts
+
+`perception`과 `prediction`은 아직 실제 모델 통합 전 단계이므로 `placeholder.py`,
+`adapters/`, `srlstm/`처럼 역할이 드러나는 폴더를 둔다.
+
+## 4. Design choice
 
 현재 구조는 다음 원칙으로 잡았다.
 
@@ -38,7 +53,7 @@ frame input
 4. history는 tracking 내부 상태로 누적한다.
 5. prediction은 이 history를 읽어 sequence input을 만든다.
 
-## 4. Input / Output contract
+## 5. Input / Output contract
 
 ### Frame input
 
@@ -77,7 +92,7 @@ frame input
 즉 tracking 출력 전체를 바로 모델에 넣는 것이 아니라,
 prediction에 필요한 정보만 다시 정리한 sequence batch를 한 번 더 만든다.
 
-## 5. What the experiment checks
+## 6. What the experiment checks
 
 현재 demo 실험은 아래를 검증한다.
 
@@ -87,7 +102,7 @@ prediction에 필요한 정보만 다시 정리한 sequence batch를 한 번 더
 - prediction input sequence가 기대한 형식으로 만들어지는지
 - 결과가 CSV와 JSON으로 잘 저장되는지
 
-## 6. Expected next step
+## 7. Expected next step
 
 다음 단계에서는 아래로 확장하면 된다.
 

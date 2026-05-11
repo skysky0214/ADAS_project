@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-from typing import Dict, List
-
-from app.domain_types import (
+from app.core.domain_types import (
     PlannerObjectView,
     PlannerSceneSnapshot,
     PredictedTrajectory,
-    TrackedObject,
+    TrackedPedestrian,
 )
 
 
 def build_planner_snapshot(
     frame_id: int,
     timestamp_sec: float,
-    tracked_objects: List[TrackedObject],
-    predicted_trajectories: List[PredictedTrajectory],
+    tracked_objects: list[TrackedPedestrian],
+    predicted_trajectories: list[PredictedTrajectory],
 ) -> PlannerSceneSnapshot:
-    pred_map: Dict[int, PredictedTrajectory] = {
+    pred_map: dict[int, PredictedTrajectory] = {
         item.track_id: item for item in predicted_trajectories
     }
 
@@ -30,10 +28,11 @@ def build_planner_snapshot(
         planner_objects.append(
             PlannerObjectView(
                 track_id=obj.track_id,
-                label=obj.label,
+                label="Pedestrian",
                 current_position=(obj.x, obj.y, obj.z),
                 current_velocity=(obj.vx, obj.vy),
                 predicted_path=predicted_path,
+                missed=obj.missed,
             )
         )
 

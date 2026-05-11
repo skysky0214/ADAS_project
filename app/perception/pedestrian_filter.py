@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from app.domain_types import DetectedObject, PedestrianDetection
+from app.core.domain_types import DetectedObject, PedestrianDetection
 
 
 def filter_pedestrians(detections: List[DetectedObject]) -> List[PedestrianDetection]:
@@ -15,6 +15,11 @@ def filter_pedestrians(detections: List[DetectedObject]) -> List[PedestrianDetec
                 score=det.score,
                 x=det.x,
                 y=det.y,
+                z=det.z,
+                dx=det.dx,
+                dy=det.dy,
+                dz=det.dz,
+                heading=det.heading,
             )
         )
     return pedestrians

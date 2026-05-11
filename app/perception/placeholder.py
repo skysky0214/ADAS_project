@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from app.domain_types import DetectedObject, FrameInput
+from app.core.domain_types import DetectedObject, FrameInput
 from app.perception.base import PerceptionModel
 
 
