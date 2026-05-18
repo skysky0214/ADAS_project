@@ -15,12 +15,14 @@ from geometry_msgs.msg import Point
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import PipelineConfig
+from app.control.failsafe import FailSafeConfig, FailSafeMonitor, status_to_json
 from app.control.ttc_warning import (
     TTCWarning,
     TTCWarningAdapter,
@@ -102,6 +104,9 @@ class DSVTTrackingNode(Node):
         self.detection_rows: list[dict] = []
         self.stop_requested = False
         self.outputs_saved = False
+        self.failsafe_monitor = FailSafeMonitor(
+            FailSafeConfig(lidar_timeout_sec=args.lidar_timeout_sec)
+        )
 
         config = PipelineConfig(
             perception_name="openpcdet_dsvt",
@@ -117,6 +122,12 @@ class DSVTTrackingNode(Node):
         if not args.no_rviz:
             self.marker_publisher = self.create_publisher(MarkerArray, args.marker_topic, 10)
             self.get_logger().info(f"Publishing RViz markers on {args.marker_topic}")
+        self.status_publisher = self.create_publisher(String, args.status_topic, 10)
+        self.status_timer = self.create_timer(
+            args.status_publish_period_sec,
+            self.publish_system_status,
+        )
+        self.get_logger().info(f"Publishing system status on {args.status_topic}")
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -131,10 +142,20 @@ class DSVTTrackingNode(Node):
             qos,
         )
 
+    def publish_system_status(self) -> None:
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        status = self.failsafe_monitor.build_status(now_sec)
+        msg = String()
+        msg.data = status_to_json(status)
+        self.status_publisher.publish(msg)
+
     def on_lidar_points(self, msg: PointCloud2) -> None:
         if self.args.max_frames is not None and self.frame_count >= self.args.max_frames:
             return
 
+        self.failsafe_monitor.mark_lidar_received(
+            self.get_clock().now().nanoseconds * 1e-9
+        )
         frame_id = self.frame_count
         timestamp_sec = msg_timestamp_sec(msg)
         points = pointcloud2_to_xyzi(msg)
@@ -282,6 +303,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)
     parser.add_argument("--no-rviz", action="store_true")
+    parser.add_argument("--status-topic", default="/adas/system_status")
+    parser.add_argument("--status-publish-period-sec", type=float, default=0.5)
+    parser.add_argument("--lidar-timeout-sec", type=float, default=1.0)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/live_dsvt_tracking"))
     return parser
 
