@@ -107,6 +107,10 @@ ros2 bag play
   - `frame.payload["points"]` 또는 `frame.payload["point_path"]`를 받아 `DetectedObject` 목록을 만든다.
   - 최종 인지 checkpoint `checkpoint_epoch_20.pth`를 config 기본값으로 사용한다.
 
+- `app/perception/adapters/openpcdet_pointpillar.py`
+  - OpenPCDet PointPillars 모델을 같은 `PerceptionModel` 인터페이스로 감싸는 adapter다.
+  - latency 비교 시 `app/main.py --perception pointpillar`로 선택한다.
+
 ## Tracking
 
 - `app/tracking/__init__.py`

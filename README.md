@@ -181,6 +181,7 @@ cd /home/gh/workspaces/design_project/ADAS_project
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python app/main.py \
   --topic /lidar_points \
   --score-threshold 0.1 \
+  --latency-playback-rate 0.2 \
   --output-dir artifacts/live_dsvt_tracking
 ```
 
@@ -197,9 +198,11 @@ SR-LSTM 예측까지 켜려면 node에 `--prediction srlstm`을 추가한다. SR
 ```bash
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python app/main.py \
   --topic /lidar_points \
+  --perception dsvt \
   --max-frames 20 \
   --score-threshold 0.1 \
   --prediction srlstm \
+  --latency-playback-rate 0.2 \
   --ego-speed 10.0 \
   --safety-radius 1.0 \
   --output-dir artifacts/live_dsvt_prediction
@@ -211,7 +214,12 @@ SR-LSTM 예측까지 켜려면 node에 `--prediction srlstm`을 추가한다. SR
 artifacts/live_dsvt_prediction/predicted_trajectories.csv
 artifacts/live_dsvt_prediction/predicted_trajectories.json
 artifacts/live_dsvt_prediction/ttc_warnings.json
+artifacts/live_dsvt_prediction/latency.csv
 ```
+
+`latency.csv`에는 callback 전체 처리 시간, point cloud 변환, perception, tracking, prediction, TTC warning, RViz marker publish 단계별 시간이 기록된다. rosbag 재생에서는 header stamp가 녹화 당시 시간이므로 wall-clock과 직접 비교하지 않고, `--latency-playback-rate` 기준 replay lag를 같이 기록한다.
+
+PointPillars latency를 비교할 때는 `--perception pointpillar`로 바꿔 실행한다.
 
 RViz2에서 현재 perception/tracking/prediction 결과를 같이 보려면 위 node를 그대로 실행한 뒤 RViz2에 아래 display를 추가한다.
 
