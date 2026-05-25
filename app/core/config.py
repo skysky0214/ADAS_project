@@ -1,23 +1,25 @@
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OPENPCDET_ROOT = Path("/home/sunny/OpenPCDet")
+DEFAULT_OPENPCDET_ROOT = Path(
+    os.environ.get("OPENPCDET_ROOT", "/home/gh/workspaces/design_project/OpenPCDet")
+)
 DEFAULT_CONFIGS_ROOT = PROJECT_ROOT / "configs" / "openpcdet"
+DEFAULT_PERCEPTION_CHECKPOINT_ROOT = PROJECT_ROOT / "app/perception/checkpoints"
 DEFAULT_DSVT_CFG_FILE = (
-    DEFAULT_CONFIGS_ROOT / "dsvt_custom_ft.yaml"
+    DEFAULT_CONFIGS_ROOT / "dsvt_pillar_sustech_ped_cyclist.yaml"
 )
 DEFAULT_DSVT_CHECKPOINT = (
-    DEFAULT_OPENPCDET_ROOT
-    / "output/waymo_models/dsvt_pillar/default/ckpt/checkpoint_epoch_30.pth"
+    DEFAULT_PERCEPTION_CHECKPOINT_ROOT / "dsvt_checkpoint_epoch_20.pth"
 )
 DEFAULT_POINTPILLAR_CFG_FILE = (
-    DEFAULT_CONFIGS_ROOT / "pointpillar_custom_ft.yaml"
+    DEFAULT_CONFIGS_ROOT / "pointpillar_sustech_ped_cyclist.yaml"
 )
 DEFAULT_POINTPILLAR_CHECKPOINT = (
-    DEFAULT_OPENPCDET_ROOT
-    / "output/pointpillar_custom_ft/pointpillar_ft_v1/ckpt/checkpoint_epoch_30.pth"
+    DEFAULT_PERCEPTION_CHECKPOINT_ROOT / "pointpillar_checkpoint_epoch_20.pth"
 )
 DEFAULT_SRLSTM_CHECKPOINT = (
     PROJECT_ROOT / "app/prediction/srlstm/checkpoints/E_obs4_pred8_59.tar"

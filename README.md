@@ -129,8 +129,8 @@ ADAS_project/
     prediction/
   configs/
     openpcdet/
-      pointpillar_custom_ft.yaml
-      dsvt_custom_ft.yaml
+      dsvt_pillar_sustech_ped_cyclist.yaml
+      pointpillar_sustech_ped_cyclist.yaml
 ```
 
 ## Module Roles
@@ -180,9 +180,9 @@ ADAS_project/
 - `openpcdet_dsvt.py`, `openpcdet_pointpillar.py`는 공통 base를 상속하는 adapter로 정리했다.
 - PointPillars 단일 프레임 검출 실행 스크립트 `tools/perception/run_openpcdet_pointpillar_frame.py`를 추가했다.
 - detection -> pedestrian tracking -> Open3D 시각화를 한 번에 확인하는 `tools/tracking/visualize_openpcdet_tracking_open3d.py`를 추가했다.
-- PointPillars custom yaml을 `configs/openpcdet/pointpillar_custom_ft.yaml`로 repo 내부에서 관리하도록 옮겼다.
-- `configs/openpcdet/dsvt_custom_ft.yaml` 파일 자리를 추가했다. 현재는 빈 파일이다.
-- `app/core/config.py` 기본 경로를 `/home/sunny/OpenPCDet`와 repo 내부 yaml 기준으로 정리했다.
+- DSVT/PointPillars custom yaml을 `configs/openpcdet/`에서 관리하도록 옮겼다.
+- DSVT/PointPillars checkpoint는 repo에 포함하지 않고 `app/perception/checkpoints/`에 별도로 배치한다.
+- `app/core/config.py`는 `OPENPCDET_ROOT` 환경변수를 우선 사용하고, 기본값은 `/home/gh/workspaces/design_project/OpenPCDet`로 둔다.
 
 Open3D tracking 시각화는 현재 아래 규칙으로 보이도록 맞췄다.
 
@@ -194,13 +194,27 @@ Open3D tracking 시각화는 현재 아래 규칙으로 보이도록 맞췄다.
 
 ## How to run
 
+OpenPCDet perception을 실행하려면 OpenPCDet source tree와 checkpoint가 별도로 필요하다.  
+OpenPCDet 폴더는 팀 내에서 따로 공유하고, 각자 아래처럼 경로를 설정한다.
+
+```bash
+export OPENPCDET_ROOT=/path/to/OpenPCDet
+mkdir -p app/perception/checkpoints
+```
+
+아래 두 checkpoint 파일은 Git에 포함하지 않는다. 따로 공유받아 같은 이름으로 배치한다.
+
+```text
+app/perception/checkpoints/dsvt_checkpoint_epoch_20.pth
+app/perception/checkpoints/pointpillar_checkpoint_epoch_20.pth
+```
+
 OpenPCDet DSVT 단일 프레임 smoke test:
 
 ```bash
 cd /home/gh/workspaces/design_project/ADAS_project
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/perception/run_openpcdet_dsvt_frame.py \
   /home/gh/workspaces/design_project/OpenPCDet/data/sustech_ped_cyclist/points/000000.npy \
-  --checkpoint /home/gh/workspaces/design_project/OpenPCDet/output/cfgs/custom_models/dsvt_pillar_sustech_ped_cyclist/transfer_split_v1/ckpt/checkpoint_epoch_20.pth \
   --output-json artifacts/dsvt_frame_000000.json \
   --output-csv artifacts/dsvt_frame_000000.csv
 ```
@@ -257,20 +271,22 @@ artifacts/live_dsvt_prediction/latency.csv
 
 PointPillars latency를 비교할 때는 `--perception pointpillar`로 바꿔 실행한다.
 
-현재 `/home/sunny/OpenPCDet` 환경에서 PointPillars 단일 프레임 검출만 빠르게 확인하려면 아래처럼 실행한다.
+현재 OpenPCDet 환경에서 PointPillars 단일 프레임 검출만 빠르게 확인하려면 아래처럼 실행한다.
 
 ```bash
-cd /home/sunny/ADAS_project
-python3 tools/perception/run_openpcdet_pointpillar_frame.py \
-  /home/sunny/OpenPCDet/data/custom/points/000000.npy
+cd /home/gh/workspaces/design_project/ADAS_project
+export OPENPCDET_ROOT=/home/gh/workspaces/design_project/OpenPCDet
+/home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/perception/run_openpcdet_pointpillar_frame.py \
+  /home/gh/workspaces/design_project/OpenPCDet/data/custom/points/000000.npy
 ```
 
-현재 `/home/sunny/OpenPCDet` 환경에서 OpenPCDet detection -> pedestrian tracking -> Open3D 시각화를 확인하려면 아래처럼 실행한다.
+현재 OpenPCDet 환경에서 OpenPCDet detection -> pedestrian tracking -> Open3D 시각화를 확인하려면 아래처럼 실행한다.
 
 ```bash
-cd /home/sunny/ADAS_project
-python3 tools/tracking/visualize_openpcdet_tracking_open3d.py \
-  /home/sunny/OpenPCDet/data/custom/points \
+cd /home/gh/workspaces/design_project/ADAS_project
+export OPENPCDET_ROOT=/home/gh/workspaces/design_project/OpenPCDet
+/home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/tracking/visualize_openpcdet_tracking_open3d.py \
+  /home/gh/workspaces/design_project/OpenPCDet/data/custom/points \
   --perception pointpillar \
   --ext .npy \
   --fps 5 \
