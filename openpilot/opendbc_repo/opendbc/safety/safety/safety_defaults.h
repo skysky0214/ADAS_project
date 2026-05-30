@@ -8,18 +8,32 @@ void default_rx_hook(const CANPacket_t *to_push) {
 
 // *** no output safety mode ***
 
+static uint16_t nooutput_spas_bus = 0U;
+
+const CanMsg NOOUTPUT_SPAS_TX_MSGS[] = {
+  {0x165, 0, 24}, // SPAS1
+  {0x16A, 0, 32}, // SPAS2
+  {0x165, 1, 24}, // SPAS1
+  {0x16A, 1, 32}, // SPAS2
+  {0x165, 2, 24}, // SPAS1
+  {0x16A, 2, 32}, // SPAS2
+};
+
 static safety_config nooutput_init(uint16_t param) {
-  UNUSED(param);
-  return (safety_config){NULL, 0, NULL, 0};
+  nooutput_spas_bus = (param > 2U) ? 2U : param;
+  return (safety_config){NULL, 0, NOOUTPUT_SPAS_TX_MSGS, sizeof(NOOUTPUT_SPAS_TX_MSGS) / sizeof(NOOUTPUT_SPAS_TX_MSGS[0])};
 }
 
-// GCOV_EXCL_START
-// Unreachable by design (doesn't define any tx msgs)
 static bool nooutput_tx_hook(const CANPacket_t *to_send) {
-  UNUSED(to_send);
-  return false;
+  const int addr = GET_ADDR(to_send);
+  const int bus = GET_BUS(to_send);
+  const int len = GET_LEN(to_send);
+
+  // Local EV6 bench/test support: allow only SPAS1/SPAS2 blinker frames
+  // without opening the relay. Everything else remains blocked.
+  return (bus == nooutput_spas_bus) && (((addr == 0x165) && (len == 24)) ||
+                                       ((addr == 0x16A) && (len == 32)));
 }
-// GCOV_EXCL_STOP
 
 static int default_fwd_hook(int bus_num, int addr) {
   UNUSED(bus_num);
