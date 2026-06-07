@@ -3,6 +3,8 @@
 
 # Real-Time Pedestrian Tracking Scaffold
 
+Last updated: 2026-05-23
+
 이 코드베이스는 실시간 프레임 입력이 들어올 때, 객체 인지 후 보행자만 골라 `Pedestrian Tracking`으로 넘기고, 각 보행자에 대해 **ID별 x, y history**를 누적하는 구조를 먼저 명확히 잡기 위해 만들었다.
 
 현재 단계의 핵심 목표는 prediction 이전 단계의 입력 형식을 고정하는 것이다.
@@ -101,7 +103,9 @@ ADAS_project/
       realtime_tracking.py
     perception/
       adapters/
+        openpcdet_base.py
         openpcdet_dsvt.py
+        openpcdet_pointpillar.py
       base.py
       placeholder.py
       pedestrian_filter.py
@@ -119,8 +123,14 @@ ADAS_project/
       planner_interface.py
   tools/
     perception/
+      run_openpcdet_pointpillar_frame.py
     tracking/
+      visualize_openpcdet_tracking_open3d.py
     prediction/
+  configs/
+    openpcdet/
+      dsvt_pillar_sustech_ped_cyclist.yaml
+      pointpillar_sustech_ped_cyclist.yaml
 ```
 
 ## Module Roles
@@ -141,8 +151,12 @@ ADAS_project/
   - detection 중 `Pedestrian`만 추출
 - `app/perception/adapters/`
   - 실제 detector 출력 또는 모델 inference 연결 위치
+- `app/perception/adapters/openpcdet_base.py`
+  - OpenPCDet 공통 로딩, point cloud 입력 처리, inference, `DetectedObject` 변환 담당
 - `app/perception/adapters/openpcdet_dsvt.py`
   - OpenPCDet DSVT-Pillar checkpoint를 로드해 `DetectedObject`를 생성하는 perception adapter
+- `app/perception/adapters/openpcdet_pointpillar.py`
+  - OpenPCDet PointPillars checkpoint를 로드해 `DetectedObject`를 생성하는 perception adapter
 - `app/tracking/matcher.py`
   - detection과 기존 track의 거리 계산
 - `app/tracking/pedestrian_tracker.py`
@@ -155,8 +169,45 @@ ADAS_project/
   - 실제 prediction 모델로 통합할 SR-LSTM 후보 코드
 - `tools/`
   - 변환, export, 시각화 같은 오프라인 유틸리티
+- `configs/openpcdet/`
+  - ADAS repo 내부에서 관리하는 OpenPCDet yaml 설정 파일 모음
+
+## Recent Changes
+
+2026-05-23 기준으로 아래 구조 정리를 반영했다.
+
+- OpenPCDet 공통 로직을 `app/perception/adapters/openpcdet_base.py`로 분리했다.
+- `openpcdet_dsvt.py`, `openpcdet_pointpillar.py`는 공통 base를 상속하는 adapter로 정리했다.
+- PointPillars 단일 프레임 검출 실행 스크립트 `tools/perception/run_openpcdet_pointpillar_frame.py`를 추가했다.
+- detection -> pedestrian tracking -> Open3D 시각화를 한 번에 확인하는 `tools/tracking/visualize_openpcdet_tracking_open3d.py`를 추가했다.
+- DSVT/PointPillars custom yaml을 `configs/openpcdet/`에서 관리하도록 옮겼다.
+- DSVT/PointPillars checkpoint는 repo에 포함하지 않고 `app/perception/checkpoints/`에 별도로 배치한다.
+- `app/core/config.py`는 `OPENPCDET_ROOT` 환경변수를 우선 사용하고, 기본값은 `/home/gh/workspaces/design_project/OpenPCDet`로 둔다.
+
+Open3D tracking 시각화는 현재 아래 규칙으로 보이도록 맞췄다.
+
+- pedestrian track line과 끝점은 같은 파란색으로 표시
+- detection 점은 클래스별 색상으로 표시
+- `Pedestrian`: 파랑
+- `Cyclist`: 초록
+- `Vehicle`/`Car`: 빨강
 
 ## How to run
+
+OpenPCDet perception을 실행하려면 OpenPCDet source tree와 checkpoint가 별도로 필요하다.  
+OpenPCDet 폴더는 팀 내에서 따로 공유하고, 각자 아래처럼 경로를 설정한다.
+
+```bash
+export OPENPCDET_ROOT=/path/to/OpenPCDet
+mkdir -p app/perception/checkpoints
+```
+
+아래 두 checkpoint 파일은 Git에 포함하지 않는다. 따로 공유받아 같은 이름으로 배치한다.
+
+```text
+app/perception/checkpoints/dsvt_checkpoint_epoch_20.pth
+app/perception/checkpoints/pointpillar_checkpoint_epoch_20.pth
+```
 
 OpenPCDet DSVT 단일 프레임 smoke test:
 
@@ -164,7 +215,6 @@ OpenPCDet DSVT 단일 프레임 smoke test:
 cd /home/gh/workspaces/design_project/ADAS_project
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/perception/run_openpcdet_dsvt_frame.py \
   /home/gh/workspaces/design_project/OpenPCDet/data/sustech_ped_cyclist/points/000000.npy \
-  --checkpoint /home/gh/workspaces/design_project/OpenPCDet/output/cfgs/custom_models/dsvt_pillar_sustech_ped_cyclist/transfer_split_v1/ckpt/checkpoint_epoch_20.pth \
   --output-json artifacts/dsvt_frame_000000.json \
   --output-csv artifacts/dsvt_frame_000000.csv
 ```
@@ -181,6 +231,7 @@ cd /home/gh/workspaces/design_project/ADAS_project
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python app/main.py \
   --topic /lidar_points \
   --score-threshold 0.1 \
+  --latency-playback-rate 0.2 \
   --output-dir artifacts/live_dsvt_tracking
 ```
 
@@ -197,9 +248,11 @@ SR-LSTM 예측까지 켜려면 node에 `--prediction srlstm`을 추가한다. SR
 ```bash
 /home/gh/anaconda3/envs/pedestrian_gt/bin/python app/main.py \
   --topic /lidar_points \
+  --perception dsvt \
   --max-frames 20 \
   --score-threshold 0.1 \
   --prediction srlstm \
+  --latency-playback-rate 0.2 \
   --ego-speed 10.0 \
   --safety-radius 1.0 \
   --output-dir artifacts/live_dsvt_prediction
@@ -211,7 +264,38 @@ SR-LSTM 예측까지 켜려면 node에 `--prediction srlstm`을 추가한다. SR
 artifacts/live_dsvt_prediction/predicted_trajectories.csv
 artifacts/live_dsvt_prediction/predicted_trajectories.json
 artifacts/live_dsvt_prediction/ttc_warnings.json
+artifacts/live_dsvt_prediction/latency.csv
 ```
+
+`latency.csv`에는 callback 전체 처리 시간, point cloud 변환, perception, tracking, prediction, TTC warning, RViz marker publish 단계별 시간이 기록된다. rosbag 재생에서는 header stamp가 녹화 당시 시간이므로 wall-clock과 직접 비교하지 않고, `--latency-playback-rate` 기준 replay lag를 같이 기록한다.
+
+PointPillars latency를 비교할 때는 `--perception pointpillar`로 바꿔 실행한다.
+
+현재 OpenPCDet 환경에서 PointPillars 단일 프레임 검출만 빠르게 확인하려면 아래처럼 실행한다.
+
+```bash
+cd /home/gh/workspaces/design_project/ADAS_project
+export OPENPCDET_ROOT=/home/gh/workspaces/design_project/OpenPCDet
+/home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/perception/run_openpcdet_pointpillar_frame.py \
+  /home/gh/workspaces/design_project/OpenPCDet/data/custom/points/000000.npy
+```
+
+현재 OpenPCDet 환경에서 OpenPCDet detection -> pedestrian tracking -> Open3D 시각화를 확인하려면 아래처럼 실행한다.
+
+```bash
+cd /home/gh/workspaces/design_project/ADAS_project
+export OPENPCDET_ROOT=/home/gh/workspaces/design_project/OpenPCDet
+/home/gh/anaconda3/envs/pedestrian_gt/bin/python tools/tracking/visualize_openpcdet_tracking_open3d.py \
+  /home/gh/workspaces/design_project/OpenPCDet/data/custom/points \
+  --perception pointpillar \
+  --ext .npy \
+  --fps 5 \
+  --track-radius 0.18 \
+  --track-marker-radius 0.24 \
+  --detection-radius 0.30
+```
+
+짧게 smoke test만 할 때는 `--max-frames 1`을 붙이면 된다.
 
 RViz2에서 현재 perception/tracking/prediction 결과를 같이 보려면 위 node를 그대로 실행한 뒤 RViz2에 아래 display를 추가한다.
 

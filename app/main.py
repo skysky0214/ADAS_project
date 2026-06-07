@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import math
 import signal
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
 import rclpy
-import sensor_msgs_py.point_cloud2 as pc2
-from geometry_msgs.msg import Point
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -31,10 +27,17 @@ from app.control.ttc_warning import (
 )
 from app.core.domain_types import (
     FrameInput,
-    PredictedTrajectory,
-    TrackedPedestrian,
     TrackingFrameResult,
 )
+from app.io.artifacts import (
+    prediction_rows,
+    write_detection_csv,
+    write_json,
+    write_latency_csv,
+    write_prediction_csv,
+    write_prediction_json,
+)
+from app.io.pointcloud import msg_timestamp_sec, pointcloud2_to_xyzi
 from app.core.logging_utils import (
     write_prediction_input_json,
     write_tracking_csv,
@@ -44,51 +47,7 @@ from app.bridge.planner_interface import build_planner_snapshot
 from app.perception.pedestrian_filter import filter_pedestrians
 from app.pipeline import RealTimePedestrianTrackingPipeline
 from app.prediction.input_builder import build_prediction_input
-
-
-def pointcloud2_to_xyzi(msg: PointCloud2) -> np.ndarray:
-    field_names = {field.name for field in msg.fields}
-    has_intensity = "intensity" in field_names
-    requested_fields = ("x", "y", "z", "intensity") if has_intensity else ("x", "y", "z")
-    points = pc2.read_points(msg, field_names=requested_fields, skip_nans=True)
-
-    rows = []
-    for point in points:
-        if has_intensity:
-            rows.append((point[0], point[1], point[2], point[3]))
-        else:
-            rows.append((point[0], point[1], point[2], 0.0))
-
-    if not rows:
-        return np.zeros((0, 4), dtype=np.float32)
-    return np.asarray(rows, dtype=np.float32)
-
-
-def msg_timestamp_sec(msg: PointCloud2) -> float:
-    stamp = msg.header.stamp
-    timestamp_sec = float(stamp.sec) + (float(stamp.nanosec) * 1e-9)
-    return timestamp_sec
-
-
-def write_detection_csv(rows: list[dict], csv_path: Path) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "frame",
-        "timestamp_sec",
-        "class",
-        "score",
-        "x",
-        "y",
-        "z",
-        "dx",
-        "dy",
-        "dz",
-        "heading",
-    ]
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+from app.visualization.rviz_markers import build_tracking_marker_array
 
 
 class DSVTTrackingNode(Node):
@@ -102,6 +61,9 @@ class DSVTTrackingNode(Node):
         self.planner_snapshots: list[dict] = []
         self.ttc_warnings: list[TTCWarning] = []
         self.detection_rows: list[dict] = []
+        self.latency_rows: list[dict] = []
+        self.first_msg_timestamp_sec: float | None = None
+        self.first_receive_wall_sec: float | None = None
         self.stop_requested = False
         self.outputs_saved = False
         self.failsafe_monitor = FailSafeMonitor(
@@ -109,11 +71,11 @@ class DSVTTrackingNode(Node):
         )
 
         config = PipelineConfig(
-            perception_name="openpcdet_dsvt",
+            perception_name=f"openpcdet_{args.perception}",
             perception_score_threshold=args.score_threshold,
             perception_device=args.device,
         )
-        self.get_logger().info("Loading OpenPCDet DSVT model...")
+        self.get_logger().info(f"Loading OpenPCDet {args.perception} model...")
         self.pipeline = RealTimePedestrianTrackingPipeline(config)
         self.get_logger().info("Model loaded. Waiting for PointCloud2 frames.")
         self.prediction_model = self._build_prediction_model(args, config)
@@ -153,12 +115,20 @@ class DSVTTrackingNode(Node):
         if self.args.max_frames is not None and self.frame_count >= self.args.max_frames:
             return
 
+        callback_start = time.perf_counter()
+        receive_wall_sec = time.time()
         self.failsafe_monitor.mark_lidar_received(
             self.get_clock().now().nanoseconds * 1e-9
         )
         frame_id = self.frame_count
         timestamp_sec = msg_timestamp_sec(msg)
+        if self.first_msg_timestamp_sec is None:
+            self.first_msg_timestamp_sec = timestamp_sec
+            self.first_receive_wall_sec = receive_wall_sec
+
+        stage_start = time.perf_counter()
         points = pointcloud2_to_xyzi(msg)
+        pointcloud_ms = _elapsed_ms(stage_start)
         frame = FrameInput(
             frame_id=frame_id,
             timestamp_sec=timestamp_sec,
@@ -166,13 +136,19 @@ class DSVTTrackingNode(Node):
             payload={"points": points},
         )
 
+        stage_start = time.perf_counter()
         detections = self.pipeline.detector.infer(frame)
+        perception_ms = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         pedestrian_detections = filter_pedestrians(detections)
+        filter_ms = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         tracks = self.pipeline.tracker.update(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,
             detections=pedestrian_detections,
         )
+        tracking_ms = _elapsed_ms(stage_start)
         result = TrackingFrameResult(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,
@@ -182,15 +158,19 @@ class DSVTTrackingNode(Node):
         self.results.append(result)
         self.prediction_batches.append(build_prediction_input(result))
         trajectories = []
+        prediction_ms = 0.0
         if self.prediction_model is not None:
+            stage_start = time.perf_counter()
             trajectories = self.prediction_model.predict(result.tracks)
+            prediction_ms = _elapsed_ms(stage_start)
             self.predicted_trajectories.extend(
-                _prediction_rows(
+                prediction_rows(
                     frame_id=frame.frame_id,
                     timestamp_sec=frame.timestamp_sec,
                     trajectories=trajectories,
                 )
             )
+        stage_start = time.perf_counter()
         planner_snapshot = build_planner_snapshot(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,
@@ -198,6 +178,8 @@ class DSVTTrackingNode(Node):
             predicted_trajectories=trajectories,
         )
         self.planner_snapshots.append(asdict(planner_snapshot))
+        planner_ms = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         warnings = self.warning_adapter.evaluate(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,
@@ -205,7 +187,10 @@ class DSVTTrackingNode(Node):
             predicted_trajectories=trajectories,
         )
         self.ttc_warnings.extend(warnings)
+        warning_ms = _elapsed_ms(stage_start)
+        marker_ms = 0.0
         if self.marker_publisher is not None:
+            stage_start = time.perf_counter()
             marker_frame = self.args.marker_frame or msg.header.frame_id or "map"
             self.marker_publisher.publish(
                 build_tracking_marker_array(
@@ -217,6 +202,7 @@ class DSVTTrackingNode(Node):
                     history_tail=self.args.marker_history_tail,
                 )
             )
+            marker_ms = _elapsed_ms(stage_start)
 
         for detection in detections:
             item = asdict(detection)
@@ -230,11 +216,39 @@ class DSVTTrackingNode(Node):
             )
 
         if frame_id % self.args.print_every == 0:
+            total_ms = _elapsed_ms(callback_start)
+            playback_lag_ms = self._playback_lag_ms(timestamp_sec, receive_wall_sec)
             self.get_logger().info(
                 f"frame={frame_id} points={len(points)} detections={len(detections)} "
                 f"pedestrians={len(pedestrian_detections)} tracks={len(tracks)} "
-                f"predicted={len(trajectories)} warnings={len([item for item in warnings if item.level > 0])}"
+                f"predicted={len(trajectories)} warnings={len([item for item in warnings if item.level > 0])} "
+                f"latency_total={total_ms:.1f}ms perception={perception_ms:.1f}ms "
+                f"prediction={prediction_ms:.1f}ms replay_lag={playback_lag_ms:.1f}ms"
             )
+
+        self.latency_rows.append(
+            {
+                "frame": frame_id,
+                "msg_timestamp_sec": timestamp_sec,
+                "receive_wall_sec": receive_wall_sec,
+                "playback_lag_ms": self._playback_lag_ms(timestamp_sec, receive_wall_sec),
+                "total_callback_ms": _elapsed_ms(callback_start),
+                "pointcloud_ms": pointcloud_ms,
+                "perception_ms": perception_ms,
+                "filter_ms": filter_ms,
+                "tracking_ms": tracking_ms,
+                "prediction_ms": prediction_ms,
+                "planner_ms": planner_ms,
+                "warning_ms": warning_ms,
+                "marker_ms": marker_ms,
+                "points": len(points),
+                "detections": len(detections),
+                "pedestrians": len(pedestrian_detections),
+                "tracks": len(tracks),
+                "predicted": len(trajectories),
+                "active_warnings": len([item for item in warnings if item.level > 0]),
+            }
+        )
 
         self.frame_count += 1
         if self.args.save_every and self.frame_count % self.args.save_every == 0:
@@ -246,11 +260,17 @@ class DSVTTrackingNode(Node):
             self.stop_requested = True
 
     def save_outputs(self) -> None:
+        if self.args.output_dir is None:
+            self.outputs_saved = True
+            self.get_logger().info("No --output-dir set. Skipping artifact export.")
+            return
+
         output_dir = self.args.output_dir
         write_tracking_csv(self.results, output_dir / "tracking_results.csv")
         write_tracking_json(self.results, output_dir / "tracking_results.json")
         write_prediction_input_json(self.prediction_batches, output_dir / "prediction_input.json")
         write_detection_csv(self.detection_rows, output_dir / "detections.csv")
+        write_latency_csv(self.latency_rows, output_dir / "latency.csv")
         if self.predicted_trajectories:
             write_prediction_csv(self.predicted_trajectories, output_dir / "predicted_trajectories.csv")
             write_prediction_json(self.predicted_trajectories, output_dir / "predicted_trajectories.json")
@@ -283,12 +303,21 @@ class DSVTTrackingNode(Node):
             )
         )
 
+    def _playback_lag_ms(self, timestamp_sec: float, receive_wall_sec: float) -> float:
+        if self.first_msg_timestamp_sec is None or self.first_receive_wall_sec is None:
+            return 0.0
+        msg_elapsed = timestamp_sec - self.first_msg_timestamp_sec
+        wall_elapsed = receive_wall_sec - self.first_receive_wall_sec
+        expected_wall_elapsed = msg_elapsed / max(self.args.latency_playback_rate, 1e-6)
+        return (wall_elapsed - expected_wall_elapsed) * 1000.0
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Subscribe to ROS2 PointCloud2, run OpenPCDet DSVT, and track pedestrians"
+        description="Subscribe to ROS2 PointCloud2, run OpenPCDet perception, and track pedestrians"
     )
     parser.add_argument("--topic", default="/lidar_points")
+    parser.add_argument("--perception", choices=["dsvt", "pointpillar"], default="pointpillar")
     parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--queue-size", type=int, default=1)
@@ -297,6 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-every", type=int, default=0)
     parser.add_argument("--prediction", choices=["none", "srlstm"], default="none")
     parser.add_argument("--prediction-fps", type=float, default=2.5)
+    parser.add_argument(
+        "--latency-playback-rate",
+        type=float,
+        default=1.0,
+        help="rosbag play rate used to estimate replay lag from message stamps",
+    )
     parser.add_argument("--ego-speed", type=float, default=10.0)
     parser.add_argument("--safety-radius", type=float, default=1.0)
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
@@ -306,189 +341,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-topic", default="/adas/system_status")
     parser.add_argument("--status-publish-period-sec", type=float, default=0.5)
     parser.add_argument("--lidar-timeout-sec", type=float, default=1.0)
-    parser.add_argument("--output-dir", type=Path, default=Path("artifacts/live_dsvt_tracking"))
+    parser.add_argument("--output-dir", type=Path, default=None)
     return parser
 
 
-def _set_marker_color(marker: Marker, rgba: tuple[float, float, float, float]) -> None:
-    marker.color.r = rgba[0]
-    marker.color.g = rgba[1]
-    marker.color.b = rgba[2]
-    marker.color.a = rgba[3]
-
-
-def _point(x: float, y: float, z: float = 0.0) -> Point:
-    point = Point()
-    point.x = float(x)
-    point.y = float(y)
-    point.z = float(z)
-    return point
-
-
-def _base_marker(frame_id: str, timestamp, namespace: str, marker_id: int, marker_type: int) -> Marker:
-    marker = Marker()
-    marker.header.frame_id = frame_id
-    marker.header.stamp = timestamp
-    marker.ns = namespace
-    marker.id = marker_id
-    marker.type = marker_type
-    marker.action = Marker.ADD
-    marker.pose.orientation.w = 1.0
-    return marker
-
-
-def _yaw_to_quaternion(marker: Marker, yaw: float) -> None:
-    marker.pose.orientation.z = math.sin(yaw / 2.0)
-    marker.pose.orientation.w = math.cos(yaw / 2.0)
-
-
-def build_tracking_marker_array(
-    frame_id: str,
-    timestamp,
-    tracks: list[TrackedPedestrian],
-    trajectories: list[PredictedTrajectory],
-    warnings: list[TTCWarning],
-    history_tail: int,
-) -> MarkerArray:
-    marker_array = MarkerArray()
-
-    delete_marker = Marker()
-    delete_marker.header.frame_id = frame_id
-    delete_marker.header.stamp = timestamp
-    delete_marker.action = Marker.DELETEALL
-    marker_array.markers.append(delete_marker)
-
-    prediction_by_track = {trajectory.track_id: trajectory for trajectory in trajectories}
-    warning_by_track = {warning.track_id: warning for warning in warnings if warning.level > 0}
-
-    for track in tracks:
-        box = _base_marker(frame_id, timestamp, "tracked_boxes", track.track_id, Marker.CUBE)
-        box.pose.position.x = float(track.x)
-        box.pose.position.y = float(track.y)
-        box.pose.position.z = float(track.z)
-        _yaw_to_quaternion(box, float(track.heading or 0.0))
-        box.scale.x = float(track.dx or 0.8)
-        box.scale.y = float(track.dy or 0.8)
-        box.scale.z = float(track.dz or 1.7)
-        _set_marker_color(box, (0.1, 0.75, 1.0, 0.35 if track.missed else 0.7))
-        marker_array.markers.append(box)
-
-        text = _base_marker(frame_id, timestamp, "track_ids", 10_000 + track.track_id, Marker.TEXT_VIEW_FACING)
-        text.pose.position.x = float(track.x)
-        text.pose.position.y = float(track.y)
-        text.pose.position.z = float(track.z + (track.dz or 1.7) + 0.35)
-        text.scale.z = 0.6
-        text.text = f"ID {track.track_id}"
-        _set_marker_color(text, (1.0, 1.0, 1.0, 1.0))
-        marker_array.markers.append(text)
-
-        history = track.history[-history_tail:] if history_tail > 0 else track.history
-        if len(history) >= 2:
-            history_marker = _base_marker(
-                frame_id,
-                timestamp,
-                "track_history",
-                20_000 + track.track_id,
-                Marker.LINE_STRIP,
-            )
-            history_marker.scale.x = 0.08
-            _set_marker_color(history_marker, (0.0, 1.0, 0.3, 0.9))
-            history_marker.points = [_point(point.x, point.y, 0.15) for point in history]
-            marker_array.markers.append(history_marker)
-
-        trajectory = prediction_by_track.get(track.track_id)
-        if trajectory is not None and trajectory.points:
-            pred_marker = _base_marker(
-                frame_id,
-                timestamp,
-                "predicted_paths",
-                30_000 + track.track_id,
-                Marker.LINE_STRIP,
-            )
-            pred_marker.scale.x = 0.08
-            _set_marker_color(pred_marker, (1.0, 0.2, 0.2, 0.95))
-            pred_marker.points = [_point(track.x, track.y, 0.25)]
-            pred_marker.points.extend(_point(point.x, point.y, 0.25) for point in trajectory.points)
-            marker_array.markers.append(pred_marker)
-
-        warning = warning_by_track.get(track.track_id)
-        if warning is not None:
-            warning_marker = _base_marker(
-                frame_id,
-                timestamp,
-                "ttc_warnings",
-                40_000 + track.track_id,
-                Marker.TEXT_VIEW_FACING,
-            )
-            warning_marker.pose.position.x = float(track.x)
-            warning_marker.pose.position.y = float(track.y)
-            warning_marker.pose.position.z = float(track.z + (track.dz or 1.7) + 1.0)
-            warning_marker.scale.z = 0.65
-            warning_marker.text = (
-                f"L{warning.level} TTC {warning.min_ttc_sec:.2f}s "
-                f"a={warning.target_accel_mps2:.1f}"
-            )
-            color = {
-                1: (1.0, 1.0, 0.0, 1.0),
-                2: (1.0, 0.55, 0.0, 1.0),
-                3: (1.0, 0.0, 0.0, 1.0),
-            }.get(warning.level, (1.0, 1.0, 1.0, 1.0))
-            _set_marker_color(warning_marker, color)
-            marker_array.markers.append(warning_marker)
-
-    return marker_array
-
-
-def _prediction_rows(
-    frame_id: int,
-    timestamp_sec: float,
-    trajectories: list[PredictedTrajectory],
-) -> list[dict]:
-    rows = []
-    for trajectory in trajectories:
-        for point in trajectory.points:
-            rows.append(
-                {
-                    "frame": frame_id,
-                    "timestamp_sec": timestamp_sec,
-                    "track_id": trajectory.track_id,
-                    "t_sec": point.t_sec,
-                    "x": point.x,
-                    "y": point.y,
-                    "confidence": trajectory.confidence,
-                    "model": trajectory.model_name,
-                }
-            )
-    return rows
-
-
-def write_prediction_csv(rows: list[dict], csv_path: Path) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "frame",
-        "timestamp_sec",
-        "track_id",
-        "t_sec",
-        "x",
-        "y",
-        "confidence",
-        "model",
-    ]
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def write_prediction_json(rows: list[dict], json_path: Path) -> None:
-    write_json(rows, json_path)
-
-
-def write_json(rows: list[dict], json_path: Path) -> None:
-    import json
-
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
 
 
 def main() -> None:
@@ -497,7 +355,7 @@ def main() -> None:
     node = DSVTTrackingNode(args)
 
     def handle_signal(signum, frame):
-        node.get_logger().info("Signal received. Saving outputs before shutdown.")
+        node.get_logger().info("Signal received. Shutting down.")
         node.save_outputs()
         node.stop_requested = True
 

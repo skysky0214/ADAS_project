@@ -61,4 +61,14 @@ class RealTimePedestrianTrackingPipeline:
                 score_threshold=config.perception_score_threshold,
                 device=config.perception_device,
             )
+        if config.perception_name == "openpcdet_pointpillar":
+            from app.perception.adapters.openpcdet_pointpillar import OpenPCDetPointPillarPerceptionModel
+
+            return OpenPCDetPointPillarPerceptionModel(
+                openpcdet_root=config.openpcdet_root,
+                cfg_file=config.pointpillar_cfg_file,
+                checkpoint=config.pointpillar_checkpoint,
+                score_threshold=config.perception_score_threshold,
+                device=config.perception_device,
+            )
         raise ValueError(f"Unknown perception adapter: {config.perception_name}")
