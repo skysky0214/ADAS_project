@@ -8,13 +8,23 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+def _normalize_prediction_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Accept both legacy export CSVs and app/main.py runtime prediction CSVs."""
+    df = df.copy()
+    if "id" not in df.columns and "track_id" in df.columns:
+        df = df.rename(columns={"track_id": "id"})
+    if "type" not in df.columns:
+        df["type"] = "pred"
+    return df
+
+
 def plot_srlstm_predictions(
     csv_path: Path,
     output_path: Path,
     max_ids: int | None = None,
     selected_ids: list[int] | None = None,
 ) -> None:
-    df = pd.read_csv(csv_path)
+    df = _normalize_prediction_csv(pd.read_csv(csv_path))
     required_cols = {"frame", "id", "x", "y", "type"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"CSV must contain columns: {sorted(required_cols)}")

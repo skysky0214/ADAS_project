@@ -279,6 +279,9 @@ class DSVTTrackingNode(Node):
                 ego_speed_mps=args.ego_speed,
                 prediction_dt_sec=1.0 / args.prediction_fps,
                 safety_radius_m=args.safety_radius,
+                vehicle_front_m=args.vehicle_front,
+                vehicle_rear_m=args.vehicle_rear,
+                vehicle_side_m=args.vehicle_side,
             )
         )
 
@@ -313,6 +316,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ego-speed", type=float, default=10.0)
     parser.add_argument("--safety-radius", type=float, default=1.0)
+    parser.add_argument(
+        "--vehicle-front",
+        type=float,
+        default=2.40,
+        help="Forward vehicle footprint from LiDAR origin in meters",
+    )
+    parser.add_argument(
+        "--vehicle-rear",
+        type=float,
+        default=2.10,
+        help="Rearward vehicle footprint from LiDAR origin in meters",
+    )
+    parser.add_argument("--vehicle-side", type=float, default=1.00, help="Lateral vehicle footprint from LiDAR origin in meters")
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)

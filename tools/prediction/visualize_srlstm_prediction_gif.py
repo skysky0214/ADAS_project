@@ -8,6 +8,23 @@ import pandas as pd
 from matplotlib.animation import FuncAnimation, PillowWriter
 
 
+def _normalize_prediction_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Accept both legacy export CSVs and app/main.py runtime prediction CSVs."""
+    df = df.copy()
+    if "id" not in df.columns and "track_id" in df.columns:
+        df = df.rename(columns={"track_id": "id"})
+    if "anchor_frame" not in df.columns and "frame" in df.columns:
+        df["anchor_frame"] = df["frame"]
+    if "type" not in df.columns:
+        df["type"] = "pred"
+    if "step" not in df.columns:
+        if "t_sec" in df.columns:
+            df["step"] = df.groupby(["anchor_frame", "id"])["t_sec"].rank(method="first").astype(int)
+        else:
+            df["step"] = df.groupby(["anchor_frame", "id"]).cumcount() + 1
+    return df
+
+
 def make_prediction_gif(
     csv_path: Path,
     output_gif: Path,
@@ -17,7 +34,7 @@ def make_prediction_gif(
     interval_ms: int = 220,
     selected_ids: list[int] | None = None,
 ) -> None:
-    df = pd.read_csv(csv_path)
+    df = _normalize_prediction_csv(pd.read_csv(csv_path))
     required = {"frame", "anchor_frame", "step", "id", "x", "y", "type"}
     if not required.issubset(df.columns):
         raise ValueError(f"CSV must contain columns: {sorted(required)}")

@@ -16,6 +16,9 @@ class TTCWarningConfig:
     prediction_dt_sec: float = 0.4
     safety_radius_m: float = 1.0
     ego_speed_mps: float = 10.0
+    vehicle_front_m: float = 2.40
+    vehicle_rear_m: float = 2.10
+    vehicle_side_m: float = 1.00
     max_decel_mps2: float = -8.0
     max_jerk_mps3: float = 50.0
 
@@ -86,24 +89,43 @@ class TTCWarningAdapter:
         points: list[TrajectoryPoint],
     ) -> "_TTCComputation":
         config = self.config
-        prev_distance = math.hypot(current_track.x, current_track.y)
+        front_m = config.vehicle_front_m + config.safety_radius_m
+        rear_m = config.vehicle_rear_m + config.safety_radius_m
+        side_m = config.vehicle_side_m + config.safety_radius_m
+        prev_distance = self._distance_to_footprint(
+            current_track.x,
+            current_track.y,
+            front_m,
+            rear_m,
+            side_m,
+        )
+        if prev_distance <= 0.0:
+            return _TTCComputation(
+                min_ttc_sec=0.0,
+                distance_m=0.0,
+                collision_time_sec=0.0,
+            )
+
         best_ttc = float("inf")
         best_distance = prev_distance
         best_collision_time = float("inf")
 
         for index, point in enumerate(points):
             t_sec = point.t_sec if point.t_sec is not None else (index + 1) * config.prediction_dt_sec
-            ego_x = config.ego_speed_mps * t_sec
-            ego_y = 0.0
-            distance = math.hypot(point.x - ego_x, point.y - ego_y)
+            distance = self._distance_to_footprint(
+                point.x - config.ego_speed_mps * t_sec,
+                point.y,
+                front_m,
+                rear_m,
+                side_m,
+            )
 
             prev_t_sec = 0.0 if index == 0 else points[index - 1].t_sec
             dt = max(t_sec - prev_t_sec, 1e-6)
             approach_speed = (prev_distance - distance) / dt
             speed_ttc = distance / approach_speed if approach_speed > 0.0 and distance > 0.0 else float("inf")
 
-            in_path = abs(point.y - ego_y) <= config.safety_radius_m
-            direct_ttc = t_sec if distance <= config.safety_radius_m and in_path else float("inf")
+            direct_ttc = t_sec if distance <= 0.0 else float("inf")
 
             point_ttc = min(speed_ttc, direct_ttc)
             if point_ttc < best_ttc:
@@ -118,6 +140,12 @@ class TTCWarningAdapter:
             distance_m=best_distance,
             collision_time_sec=best_collision_time,
         )
+
+    @staticmethod
+    def _distance_to_footprint(local_x: float, local_y: float, front_m: float, rear_m: float, side_m: float) -> float:
+        dx = max(local_x - front_m, -local_x - rear_m, 0.0)
+        dy = max(abs(local_y) - side_m, 0.0)
+        return math.hypot(dx, dy)
 
     def s_curve_deceleration(self, ttc_sec: float) -> float:
         config = self.config

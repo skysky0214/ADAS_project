@@ -2,3 +2,11 @@ __pycache__/
 *.pyc
 artifacts/
 app/perception/checkpoints/
+.venv/
+.cache/
+.cuda-nvcc-*/
+_backup_openpilot_untracked_*/
+openpilot/
+ros2/build/
+ros2/install/
+ros2/log/
