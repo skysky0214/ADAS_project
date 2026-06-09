@@ -21,7 +21,7 @@ class TTCWarningConfig:
     max_decel_mps2: float = -8.0
     max_jerk_mps3: float = 50.0
     roi_x_min: float = 1.0
-    roi_x_max: float = 30.0
+    roi_x_max: float = 15.0
     roi_y_min: float = -1.0
     roi_y_max: float = 1.0
     roi_z_min: float = -1.4

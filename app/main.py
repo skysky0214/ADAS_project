@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ego-speed", type=float, default=10.0)
     parser.add_argument("--safety-radius", type=float, default=1.0)
     parser.add_argument("--roi-x-min", type=float, default=1.0)
-    parser.add_argument("--roi-x-max", type=float, default=30.0)
+    parser.add_argument("--roi-x-max", type=float, default=15.0)
     parser.add_argument("--roi-y-min", type=float, default=-1.0)
     parser.add_argument("--roi-y-max", type=float, default=1.0)
     parser.add_argument("--roi-z-min", type=float, default=-1.4)
