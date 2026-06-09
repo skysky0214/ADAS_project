@@ -103,6 +103,57 @@ def build_tracking_marker_array(
             _set_marker_color(warning_marker, color)
             marker_array.markers.append(warning_marker)
 
+    # Render static obstacle warnings
+    for warning in warnings:
+        if warning.track_id == -99 and warning.level > 0:
+            # TEXT marker for warning message
+            text_marker = _base_marker(
+                frame_id,
+                timestamp,
+                "static_ttc_warnings",
+                50_000,
+                Marker.TEXT_VIEW_FACING,
+            )
+            text_marker.pose.position.x = float(warning.distance_m)
+            text_marker.pose.position.y = 0.0
+            text_marker.pose.position.z = 0.8
+            text_marker.scale.z = 0.7
+            text_marker.text = (
+                f"[STATIC] L{warning.level} TTC {warning.min_ttc_sec:.2f}s "
+                f"dist={warning.distance_m:.1f}m"
+            )
+            color = {
+                1: (1.0, 1.0, 0.0, 1.0),
+                2: (1.0, 0.55, 0.0, 1.0),
+                3: (1.0, 0.0, 0.0, 1.0),
+            }.get(warning.level, (1.0, 1.0, 1.0, 1.0))
+            _set_marker_color(text_marker, color)
+            marker_array.markers.append(text_marker)
+
+            # CUBE marker to highlight the static obstacle warning zone
+            box_marker = _base_marker(
+                frame_id,
+                timestamp,
+                "static_obstacle_box",
+                50_001,
+                Marker.CUBE,
+            )
+            box_marker.pose.position.x = float(warning.distance_m)
+            box_marker.pose.position.y = 0.0
+            box_marker.pose.position.z = 0.0
+            box_marker.scale.x = 1.0
+            box_marker.scale.y = 2.0
+            box_marker.scale.z = 1.0
+            
+            # Semi-transparent coloring based on danger level
+            rgba = {
+                1: (1.0, 1.0, 0.0, 0.35),
+                2: (1.0, 0.55, 0.0, 0.45),
+                3: (1.0, 0.0, 0.0, 0.55),
+            }.get(warning.level, (1.0, 1.0, 1.0, 0.2))
+            _set_marker_color(box_marker, rgba)
+            marker_array.markers.append(box_marker)
+
     return marker_array
 
 

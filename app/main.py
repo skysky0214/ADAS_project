@@ -164,6 +164,7 @@ class DSVTTrackingNode(Node):
             timestamp_sec=frame.timestamp_sec,
             tracked_objects=result.tracks,
             predicted_trajectories=trajectories,
+            points=points,
         )
         self.ttc_warnings.extend(warnings)
         warning_ms = _elapsed_ms(stage_start)
@@ -279,6 +280,13 @@ class DSVTTrackingNode(Node):
                 ego_speed_mps=args.ego_speed,
                 prediction_dt_sec=1.0 / args.prediction_fps,
                 safety_radius_m=args.safety_radius,
+                roi_x_min=args.roi_x_min,
+                roi_x_max=args.roi_x_max,
+                roi_y_min=args.roi_y_min,
+                roi_y_max=args.roi_y_max,
+                roi_z_min=args.roi_z_min,
+                roi_z_max=args.roi_z_max,
+                static_obstacle_min_points=args.static_min_points,
             )
         )
 
@@ -313,6 +321,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ego-speed", type=float, default=10.0)
     parser.add_argument("--safety-radius", type=float, default=1.0)
+    parser.add_argument("--roi-x-min", type=float, default=1.0)
+    parser.add_argument("--roi-x-max", type=float, default=30.0)
+    parser.add_argument("--roi-y-min", type=float, default=-1.0)
+    parser.add_argument("--roi-y-max", type=float, default=1.0)
+    parser.add_argument("--roi-z-min", type=float, default=-1.4)
+    parser.add_argument("--roi-z-max", type=float, default=1.0)
+    parser.add_argument("--static-min-points", type=int, default=15)
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)
