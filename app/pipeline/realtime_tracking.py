@@ -71,4 +71,15 @@ class RealTimePedestrianTrackingPipeline:
                 score_threshold=config.perception_score_threshold,
                 device=config.perception_device,
             )
+        if config.perception_name == "clustering":
+            from app.perception.adapters.clustering_detector import ClusteringPerceptionModel
+
+            return ClusteringPerceptionModel(
+                roi_x_min=config.roi_x_min,
+                roi_x_max=config.roi_x_max,
+                roi_y_min=config.roi_y_min,
+                roi_y_max=config.roi_y_max,
+                roi_z_min=config.roi_z_min,
+                roi_z_max=config.roi_z_max,
+            )
         raise ValueError(f"Unknown perception adapter: {config.perception_name}")
