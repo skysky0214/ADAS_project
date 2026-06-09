@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -33,6 +34,73 @@ class PedestrianTracker:
         self.history_size = history_size
         self._next_track_id = 1
         self._tracks: Dict[int, _TrackState] = {}
+
+    def reset(self) -> None:
+        self._tracks.clear()
+
+    def apply_ego_motion(self, dx_m: float, dy_m: float, dyaw_rad: float, reset: bool = False) -> None:
+        """Move existing tracks from the previous ego frame into the current one.
+
+        New detections are already expressed in the current LiDAR/ego frame. Before
+        matching, old tracks and history must be transformed by the vehicle motion:
+
+          p_current = R(-dyaw) @ (p_previous - [dx, dy])
+        """
+        if reset:
+            self.reset()
+            return
+        if not self._tracks:
+            return
+        if abs(dx_m) < 1e-6 and abs(dy_m) < 1e-6 and abs(dyaw_rad) < 1e-7:
+            return
+
+        cos_yaw = math.cos(-dyaw_rad)
+        sin_yaw = math.sin(-dyaw_rad)
+
+        def transform_xy(x: float, y: float) -> tuple[float, float]:
+            translated_x = x - dx_m
+            translated_y = y - dy_m
+            return (
+                (cos_yaw * translated_x) - (sin_yaw * translated_y),
+                (sin_yaw * translated_x) + (cos_yaw * translated_y),
+            )
+
+        updated: Dict[int, _TrackState] = {}
+        for track_id, state in self._tracks.items():
+            track = state.track
+            x, y = transform_xy(track.x, track.y)
+            vx = (cos_yaw * track.vx) - (sin_yaw * track.vy)
+            vy = (sin_yaw * track.vx) + (cos_yaw * track.vy)
+            history = []
+            for point in track.history:
+                history_x, history_y = transform_xy(point.x, point.y)
+                history.append(
+                    HistoryPoint(
+                        frame_id=point.frame_id,
+                        timestamp_sec=point.timestamp_sec,
+                        x=history_x,
+                        y=history_y,
+                    )
+                )
+            heading = track.heading - dyaw_rad if track.heading is not None else None
+            updated[track_id] = _TrackState(
+                track=TrackedPedestrian(
+                    track_id=track.track_id,
+                    x=x,
+                    y=y,
+                    z=track.z,
+                    vx=vx,
+                    vy=vy,
+                    missed=track.missed,
+                    score=track.score,
+                    dx=track.dx,
+                    dy=track.dy,
+                    dz=track.dz,
+                    heading=heading,
+                    history=history,
+                )
+            )
+        self._tracks = updated
 
     def update(
         self,

@@ -24,11 +24,27 @@ class SRLSTMPredictionModel(PredictionModel):
         self._load_model()
 
     def predict(self, tracked_objects: list[TrackedPedestrian]) -> list[PredictedTrajectory]:
-        detections = {
-            track.track_id: (float(track.x), float(track.y))
-            for track in tracked_objects
-            if track.missed == 0
-        }
+        detections = {}
+        active_track_ids = set()
+        for track in tracked_objects:
+            if track.missed != 0:
+                continue
+            active_track_ids.add(track.track_id)
+            detections[track.track_id] = (float(track.x), float(track.y))
+
+            # Keep SR-LSTM's observation buffer aligned to the tracker history.
+            # The tracker history is already ego-motion compensated into the
+            # current LiDAR frame; appending raw per-frame detections here would
+            # reintroduce ego-relative drift for stationary objects.
+            history_xy = [(float(point.x), float(point.y)) for point in track.history]
+            self.predictor.obs_buffer[track.track_id] = history_xy[:-1]
+
+        for stale_track_id in list(self.predictor.obs_buffer):
+            if stale_track_id not in active_track_ids:
+                del self.predictor.obs_buffer[stale_track_id]
+                self.predictor.last_predictions.pop(stale_track_id, None)
+                self.predictor.last_ttc.pop(stale_track_id, None)
+
         result = self.predictor.update(detections=detections)
         predictions: dict[int, np.ndarray] = result["predictions"]
 
