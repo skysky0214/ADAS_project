@@ -275,6 +275,8 @@ class DSVTTrackingNode(Node):
             model = SRLSTMPredictionModel(
                 checkpoint=config.srlstm_checkpoint,
                 sensor_fps=args.prediction_fps,
+                smooth_alpha=args.prediction_smooth_alpha,
+                max_pedestrian_speed=args.prediction_max_speed,
             )
             self.get_logger().info("SR-LSTM prediction model loaded.")
             return model
@@ -334,6 +336,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-z-min", type=float, default=-1.4)
     parser.add_argument("--roi-z-max", type=float, default=1.0)
     parser.add_argument("--static-min-points", type=int, default=15)
+    parser.add_argument("--prediction-smooth-alpha", type=float, default=0.4,
+                        help="EMA smoothing factor for predicted trajectories (0=full smooth, 1=no smooth)")
+    parser.add_argument("--prediction-max-speed", type=float, default=3.0,
+                        help="Max pedestrian speed for trajectory clamping (m/s)")
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)
