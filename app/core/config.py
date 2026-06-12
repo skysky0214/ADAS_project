@@ -43,9 +43,3 @@ class PipelineConfig:
     tracker_reconnect_distance: float = 2.4
     tracker_max_missed: int = 5
     history_size: int = 10
-    roi_x_min: float = 2.5
-    roi_x_max: float = 15.0
-    roi_y_min: float = -1.1
-    roi_y_max: float = 1.1
-    roi_z_min: float = -1.4
-    roi_z_max: float = 1.0

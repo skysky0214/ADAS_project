@@ -66,15 +66,9 @@ class DSVTTrackingNode(Node):
         self.outputs_saved = False
 
         config = PipelineConfig(
-            perception_name="clustering" if args.perception == "clustering" else f"openpcdet_{args.perception}",
+            perception_name=f"openpcdet_{args.perception}",
             perception_score_threshold=args.score_threshold,
             perception_device=args.device,
-            roi_x_min=args.roi_x_min,
-            roi_x_max=args.roi_x_max,
-            roi_y_min=args.roi_y_min,
-            roi_y_max=args.roi_y_max,
-            roi_z_min=args.roi_z_min,
-            roi_z_max=args.roi_z_max,
         )
         self.get_logger().info(f"Loading OpenPCDet {args.perception} model...")
         self.pipeline = RealTimePedestrianTrackingPipeline(config)
@@ -312,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Subscribe to ROS2 PointCloud2, run OpenPCDet perception, and track pedestrians"
     )
     parser.add_argument("--topic", default="/lidar_points")
-    parser.add_argument("--perception", choices=["dsvt", "pointpillar", "clustering"], default="clustering")
+    parser.add_argument("--perception", choices=["dsvt", "pointpillar"], default="pointpillar")
     parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--queue-size", type=int, default=1)

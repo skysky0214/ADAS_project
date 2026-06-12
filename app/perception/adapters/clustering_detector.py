@@ -15,12 +15,12 @@ class ClusteringPerceptionModel(PerceptionModel):
 
     def __init__(
         self,
-        roi_x_min: float = 2.5,
-        roi_x_max: float = 15.0,
-        roi_y_min: float = -1.1,
-        roi_y_max: float = 1.1,
-        roi_z_min: float = -1.4,
-        roi_z_max: float = 1.0,
+        roi_x_min: float = 0.5,
+        roi_x_max: float = 50.0,
+        roi_y_min: float = -20.0,
+        roi_y_max: float = 20.0,
+        roi_z_min: float = -2.0,
+        roi_z_max: float = 2.0,
         voxel_size: float = 0.08,
         plane_distance_threshold: float = 0.12,
         plane_ransac_n: int = 3,
