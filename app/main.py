@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import sys
 import time
@@ -45,6 +46,7 @@ from app.bridge.planner_interface import build_planner_snapshot
 from app.perception.pedestrian_filter import filter_pedestrians
 from app.pipeline import RealTimePedestrianTrackingPipeline
 from app.prediction.input_builder import build_prediction_input
+from app.visualization.dashboard_client import DashboardPublisher
 from app.visualization.rviz_markers import build_tracking_marker_array
 
 
@@ -64,6 +66,8 @@ class DSVTTrackingNode(Node):
         self.first_receive_wall_sec: float | None = None
         self.stop_requested = False
         self.outputs_saved = False
+        self.dashboard_publisher = None
+        self.dashboard_error_reported = False
 
         config = PipelineConfig(
             perception_name=f"openpcdet_{args.perception}",
@@ -79,6 +83,13 @@ class DSVTTrackingNode(Node):
         if not args.no_rviz:
             self.marker_publisher = self.create_publisher(MarkerArray, args.marker_topic, 10)
             self.get_logger().info(f"Publishing RViz markers on {args.marker_topic}")
+        if args.dashboard_url:
+            self.dashboard_publisher = DashboardPublisher(
+                url=args.dashboard_url,
+                timeout_sec=args.dashboard_timeout_sec,
+                max_queue=args.dashboard_queue_size,
+            )
+            self.get_logger().info(f"Publishing browser dashboard frames to {args.dashboard_url}")
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -205,29 +216,29 @@ class DSVTTrackingNode(Node):
                 f"prediction={prediction_ms:.1f}ms replay_lag={playback_lag_ms:.1f}ms"
             )
 
-        self.latency_rows.append(
-            {
-                "frame": frame_id,
-                "msg_timestamp_sec": timestamp_sec,
-                "receive_wall_sec": receive_wall_sec,
-                "playback_lag_ms": self._playback_lag_ms(timestamp_sec, receive_wall_sec),
-                "total_callback_ms": _elapsed_ms(callback_start),
-                "pointcloud_ms": pointcloud_ms,
-                "perception_ms": perception_ms,
-                "filter_ms": filter_ms,
-                "tracking_ms": tracking_ms,
-                "prediction_ms": prediction_ms,
-                "planner_ms": planner_ms,
-                "warning_ms": warning_ms,
-                "marker_ms": marker_ms,
-                "points": len(points),
-                "detections": len(detections),
-                "pedestrians": len(pedestrian_detections),
-                "tracks": len(tracks),
-                "predicted": len(trajectories),
-                "active_warnings": len([item for item in warnings if item.level > 0]),
-            }
-        )
+        latency_row = {
+            "frame": frame_id,
+            "msg_timestamp_sec": timestamp_sec,
+            "receive_wall_sec": receive_wall_sec,
+            "playback_lag_ms": self._playback_lag_ms(timestamp_sec, receive_wall_sec),
+            "total_callback_ms": _elapsed_ms(callback_start),
+            "pointcloud_ms": pointcloud_ms,
+            "perception_ms": perception_ms,
+            "filter_ms": filter_ms,
+            "tracking_ms": tracking_ms,
+            "prediction_ms": prediction_ms,
+            "planner_ms": planner_ms,
+            "warning_ms": warning_ms,
+            "marker_ms": marker_ms,
+            "points": len(points),
+            "detections": len(detections),
+            "pedestrians": len(pedestrian_detections),
+            "tracks": len(tracks),
+            "predicted": len(trajectories),
+            "active_warnings": len([item for item in warnings if item.level > 0]),
+        }
+        self.latency_rows.append(latency_row)
+        self._publish_dashboard_frame(result, trajectories, warnings, latency_row)
 
         self.frame_count += 1
         if self.args.save_every and self.frame_count % self.args.save_every == 0:
@@ -290,6 +301,34 @@ class DSVTTrackingNode(Node):
         expected_wall_elapsed = msg_elapsed / max(self.args.latency_playback_rate, 1e-6)
         return (wall_elapsed - expected_wall_elapsed) * 1000.0
 
+    def _publish_dashboard_frame(
+        self,
+        result: TrackingFrameResult,
+        trajectories,
+        warnings: list[TTCWarning],
+        latency_row: dict,
+    ) -> None:
+        if self.dashboard_publisher is None:
+            return
+
+        payload = {
+            "frame_id": result.frame_id,
+            "timestamp_sec": result.timestamp_sec,
+            "ego_speed_mps": self.args.ego_speed,
+            "safety_radius_m": self.args.safety_radius,
+            "tracks": [asdict(track) for track in result.tracks],
+            "trajectories": [asdict(trajectory) for trajectory in trajectories],
+            "warnings": [asdict(warning) for warning in warnings],
+            "latency": latency_row,
+        }
+        self.dashboard_publisher.publish(_json_safe(payload))
+
+        if self.dashboard_publisher.last_error and not self.dashboard_error_reported:
+            self.get_logger().warn(
+                f"Dashboard publish failed once: {self.dashboard_publisher.last_error}"
+            )
+            self.dashboard_error_reported = True
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -317,12 +356,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)
     parser.add_argument("--no-rviz", action="store_true")
+    parser.add_argument(
+        "--dashboard-url",
+        default=None,
+        help="Optional browser dashboard endpoint, e.g. http://localhost:8000/api/frame",
+    )
+    parser.add_argument("--dashboard-timeout-sec", type=float, default=0.03)
+    parser.add_argument("--dashboard-queue-size", type=int, default=2)
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser
 
 
 def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
+
+
+def _json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def main() -> None:
@@ -342,6 +398,8 @@ def main() -> None:
         while rclpy.ok() and not node.stop_requested:
             rclpy.spin_once(node, timeout_sec=0.1)
     finally:
+        if node.dashboard_publisher is not None:
+            node.dashboard_publisher.close()
         if rclpy.ok() and not node.outputs_saved:
             node.save_outputs()
             rclpy.shutdown()
