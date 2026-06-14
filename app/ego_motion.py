@@ -16,6 +16,7 @@ SAFETY_SILENT = 0
 ADDR_WHEEL_SPEEDS = 160
 ADDR_MDPS = 234
 ADDR_STEERING_SENSORS = 293
+ADDR_TCS = 373
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class EgoMotionDelta:
     dyaw_rad: float = 0.0
     speed_mps: float = 0.0
     steering_deg: float = 0.0
+    brake_pressed: bool = False
+    brake_lights: bool = False
     valid: bool = False
     reset: bool = False
 
@@ -35,6 +38,8 @@ class _CanEgoState:
     moving_backward: bool = False
     steering_sensor_deg: float = 0.0
     mdps_steering_deg: float = 0.0
+    brake_pressed: bool = False
+    brake_lights: bool = False
     seen_wheel_speeds: bool = False
     seen_steering: bool = False
 
@@ -86,6 +91,8 @@ class PandaEgoMotionReader:
         self._pending_dyaw_rad = 0.0
         self._latest_speed_mps = 0.0
         self._latest_steering_deg = 0.0
+        self._latest_brake_pressed = False
+        self._latest_brake_lights = False
         self._has_sample = False
         self._reset_pending = False
         self._stopped_since: float | None = None
@@ -119,6 +126,8 @@ class PandaEgoMotionReader:
                 dyaw_rad=self._pending_dyaw_rad,
                 speed_mps=self._latest_speed_mps,
                 steering_deg=self._latest_steering_deg,
+                brake_pressed=self._latest_brake_pressed,
+                brake_lights=self._latest_brake_lights,
                 valid=self._has_sample,
                 reset=self._reset_pending,
             )
@@ -213,9 +222,11 @@ class PandaEgoMotionReader:
             else:
                 self._pending_dx_m += float(data.get("dx_m", 0.0))
                 self._pending_dy_m += float(data.get("dy_m", 0.0))
-                self._pending_dyaw_rad += float(data.get("dyaw_rad", 0.0))
+            self._pending_dyaw_rad += float(data.get("dyaw_rad", 0.0))
             self._latest_speed_mps = float(data.get("speed_mps", 0.0))
             self._latest_steering_deg = float(data.get("steering_deg", 0.0))
+            self._latest_brake_pressed = bool(data.get("brake_pressed", False) or data.get("brake_lights", False))
+            self._latest_brake_lights = bool(data.get("brake_lights", self._latest_brake_pressed))
             self._has_sample = bool(data.get("valid", False))
 
     def _integrate_can_sample(self, can_state: _CanEgoState, dt: float, now: float) -> None:
@@ -257,9 +268,11 @@ class PandaEgoMotionReader:
             else:
                 self._pending_dx_m += dx
                 self._pending_dy_m += dy
-                self._pending_dyaw_rad += dyaw
+            self._pending_dyaw_rad += dyaw
             self._latest_speed_mps = speed_mps
             self._latest_steering_deg = steering_deg
+            self._latest_brake_pressed = can_state.brake_pressed
+            self._latest_brake_lights = can_state.brake_lights
             self._has_sample = can_state.seen_wheel_speeds or can_state.seen_steering
 
     def _update_can_state(self, can_state: _CanEgoState, can_msgs) -> None:
@@ -283,6 +296,12 @@ class PandaEgoMotionReader:
             elif addr == ADDR_MDPS and len(dat) >= 18:
                 can_state.mdps_steering_deg = self._s16_le(dat, 16) * 0.1
                 can_state.seen_steering = True
+            elif addr == ADDR_TCS and len(dat) >= 11:
+                brake_light = (dat[9] >> 2) & 0x3
+                driver_braking = (dat[10] >> 6) & 0x1
+                driver_braking_low_sens = (dat[10] >> 4) & 0x1
+                can_state.brake_pressed = bool(driver_braking or driver_braking_low_sens or brake_light)
+                can_state.brake_lights = bool(brake_light or can_state.brake_pressed)
 
     @staticmethod
     def _u16_le(dat: bytes, offset: int) -> int:

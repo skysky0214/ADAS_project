@@ -17,6 +17,7 @@ SAFETY_SILENT = 0
 ADDR_WHEEL_SPEEDS = 160
 ADDR_MDPS = 234
 ADDR_STEERING_SENSORS = 293
+ADDR_TCS = 373
 
 
 @dataclass
@@ -25,6 +26,8 @@ class CanEgoState:
     moving_backward: bool = False
     steering_sensor_deg: float = 0.0
     mdps_steering_deg: float = 0.0
+    brake_pressed: bool = False
+    brake_lights: bool = False
     seen_wheel_speeds: bool = False
     seen_steering: bool = False
     stopped_since: float | None = None
@@ -60,6 +63,12 @@ def update_can_state(state: CanEgoState, can_msgs, bus: int) -> None:
         elif addr == ADDR_MDPS and len(dat) >= 18:
             state.mdps_steering_deg = s16_le(dat, 16) * 0.1
             state.seen_steering = True
+        elif addr == ADDR_TCS and len(dat) >= 11:
+            brake_light = (dat[9] >> 2) & 0x3
+            driver_braking = (dat[10] >> 6) & 0x1
+            driver_braking_low_sens = (dat[10] >> 4) & 0x1
+            state.brake_pressed = bool(driver_braking or driver_braking_low_sens or brake_light)
+            state.brake_lights = bool(brake_light or state.brake_pressed)
 
 
 def integrate(state: CanEgoState, args: argparse.Namespace, dt: float, now: float) -> tuple[dict, bool]:
@@ -96,6 +105,8 @@ def integrate(state: CanEgoState, args: argparse.Namespace, dt: float, now: floa
             "dyaw_rad": dyaw,
             "speed_mps": speed_mps,
             "steering_deg": steering_deg,
+            "brake_pressed": state.brake_pressed,
+            "brake_lights": state.brake_lights,
             "valid": state.seen_wheel_speeds or state.seen_steering,
         },
         reset,
@@ -183,6 +194,8 @@ def main() -> int:
                             "dyaw_rad": pending_dyaw,
                             "speed_mps": latest_speed,
                             "steering_deg": latest_steering,
+                            "brake_pressed": state.brake_pressed,
+                            "brake_lights": state.brake_lights,
                             "valid": latest_valid,
                             "reset": reset,
                         },

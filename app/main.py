@@ -138,6 +138,7 @@ class DSVTTrackingNode(Node):
             self.warning_adapter.config = replace(
                 self.warning_adapter.config,
                 ego_speed_mps=ego_delta.speed_mps,
+                driver_brake_pressed=ego_delta.brake_pressed,
             )
         ego_config_ms = _elapsed_ms(stage_start)
         stage_start = time.perf_counter()
@@ -295,6 +296,8 @@ class DSVTTrackingNode(Node):
             "ego_motion_reset": ego_delta.reset,
             "ego_speed_mps": ego_delta.speed_mps,
             "ego_steering_deg": ego_delta.steering_deg,
+            "ego_brake_pressed": ego_delta.brake_pressed,
+            "ego_brake_lights": ego_delta.brake_lights,
             "ego_delta_x_m": ego_delta.dx_m,
             "ego_delta_y_m": ego_delta.dy_m,
             "ego_delta_yaw_rad": ego_delta.dyaw_rad,
@@ -334,7 +337,8 @@ class DSVTTrackingNode(Node):
             if self.args.ego_compensation:
                 ego_text = (
                     f" ego_v={ego_delta.speed_mps:.2f}mps ego_dx={ego_delta.dx_m:.3f}m "
-                    f"ego_yaw={ego_delta.dyaw_rad:.4f}rad ego_reset={ego_delta.reset}"
+                    f"ego_yaw={ego_delta.dyaw_rad:.4f}rad ego_brake={ego_delta.brake_pressed} "
+                    f"ego_reset={ego_delta.reset}"
                 )
             self.get_logger().info(
                 f"frame={frame_id} points={len(points)} detections={len(detections)} "
@@ -403,6 +407,8 @@ class DSVTTrackingNode(Node):
                 vehicle_front_m=args.vehicle_front,
                 vehicle_rear_m=args.vehicle_rear,
                 vehicle_side_m=args.vehicle_side,
+                low_speed_suppress_mps=args.ttc_low_speed_kph / 3.6,
+                brake_ttc_scale=args.ttc_brake_threshold_scale,
             )
         )
 
@@ -517,6 +523,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rearward vehicle footprint from LiDAR origin in meters",
     )
     parser.add_argument("--vehicle-side", type=float, default=1.00, help="Lateral vehicle footprint from LiDAR origin in meters")
+    parser.add_argument(
+        "--ttc-low-speed-kph",
+        type=float,
+        default=10.0,
+        help="Suppress TTC warnings at or below this ego speed in km/h",
+    )
+    parser.add_argument(
+        "--ttc-brake-threshold-scale",
+        type=float,
+        default=0.70,
+        help="Scale TTC warning thresholds while driver brake is pressed; lower is tighter",
+    )
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
     parser.add_argument("--marker-frame", default=None)
     parser.add_argument("--marker-history-tail", type=int, default=20)

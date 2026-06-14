@@ -19,6 +19,9 @@ class TTCWarningConfig:
     vehicle_front_m: float = 2.40
     vehicle_rear_m: float = 2.10
     vehicle_side_m: float = 1.00
+    low_speed_suppress_mps: float = 10.0 / 3.6
+    driver_brake_pressed: bool = False
+    brake_ttc_scale: float = 0.70
     max_decel_mps2: float = -8.0
     max_jerk_mps3: float = 50.0
 
@@ -55,6 +58,9 @@ class TTCWarningAdapter:
         tracked_objects: list[TrackedPedestrian],
         predicted_trajectories: list[PredictedTrajectory],
     ) -> list[TTCWarning]:
+        if abs(self.config.ego_speed_mps) <= self.config.low_speed_suppress_mps:
+            return []
+
         track_by_id = {track.track_id: track for track in tracked_objects}
         warnings = []
         for trajectory in predicted_trajectories:
@@ -149,10 +155,11 @@ class TTCWarningAdapter:
 
     def s_curve_deceleration(self, ttc_sec: float) -> float:
         config = self.config
-        if math.isinf(ttc_sec) or ttc_sec > config.level1_ttc_sec:
+        level1_ttc_sec, _, level3_ttc_sec = self._active_thresholds()
+        if math.isinf(ttc_sec) or ttc_sec > level1_ttc_sec:
             return 0.0
 
-        ttc_mid = (config.level1_ttc_sec + config.level3_ttc_sec) / 2.0
+        ttc_mid = (level1_ttc_sec + level3_ttc_sec) / 2.0
         k = 5.0
         sigmoid = 1.0 / (1.0 + math.exp(k * (ttc_sec - ttc_mid)))
         accel_cmd = config.max_decel_mps2 * sigmoid
@@ -160,22 +167,22 @@ class TTCWarningAdapter:
         return round(accel_cmd, 3)
 
     def classify_warning(self, ttc_sec: float) -> dict:
-        config = self.config
-        if ttc_sec <= config.level3_ttc_sec:
+        level1_ttc_sec, level2_ttc_sec, level3_ttc_sec = self._active_thresholds()
+        if ttc_sec <= level3_ttc_sec:
             return {
                 "level": 3,
                 "label": "LEVEL3_AEB",
                 "action": "max_decel_candidate",
                 "color": "red",
             }
-        if ttc_sec <= config.level2_ttc_sec:
+        if ttc_sec <= level2_ttc_sec:
             return {
                 "level": 2,
                 "label": "LEVEL2_PARTIAL_BRAKE",
                 "action": "s_curve_decel_candidate",
                 "color": "orange",
             }
-        if ttc_sec <= config.level1_ttc_sec:
+        if ttc_sec <= level1_ttc_sec:
             return {
                 "level": 1,
                 "label": "LEVEL1_FCW",
@@ -188,6 +195,16 @@ class TTCWarningAdapter:
             "action": "normal",
             "color": "green",
         }
+
+    def _active_thresholds(self) -> tuple[float, float, float]:
+        config = self.config
+        scale = config.brake_ttc_scale if config.driver_brake_pressed else 1.0
+        scale = max(0.05, min(1.0, scale))
+        return (
+            config.level1_ttc_sec * scale,
+            config.level2_ttc_sec * scale,
+            config.level3_ttc_sec * scale,
+        )
 
 
 @dataclass(frozen=True)

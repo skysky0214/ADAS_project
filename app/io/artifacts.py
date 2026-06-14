@@ -78,6 +78,8 @@ def write_latency_csv(rows: list[dict], csv_path: Path, warmup_frames: int = 5) 
         "ego_motion_reset",
         "ego_speed_mps",
         "ego_steering_deg",
+        "ego_brake_pressed",
+        "ego_brake_lights",
         "ego_delta_x_m",
         "ego_delta_y_m",
         "ego_delta_yaw_rad",
