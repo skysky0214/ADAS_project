@@ -201,6 +201,7 @@ class DSVTTrackingNode(Node):
             timestamp_sec=frame.timestamp_sec,
             tracked_objects=result.tracks,
             predicted_trajectories=trajectories,
+            points=raw_points,
         )
         self.ttc_warnings.extend(warnings)
         warning_ms = _elapsed_ms(stage_start)
@@ -409,6 +410,13 @@ class DSVTTrackingNode(Node):
                 vehicle_side_m=args.vehicle_side,
                 low_speed_suppress_mps=args.ttc_low_speed_kph / 3.6,
                 brake_ttc_scale=args.ttc_brake_threshold_scale,
+                roi_x_min=args.roi_x_min,
+                roi_x_max=args.roi_x_max,
+                roi_y_min=args.roi_y_min,
+                roi_y_max=args.roi_y_max,
+                roi_z_min=args.roi_z_min,
+                roi_z_max=args.roi_z_max,
+                static_obstacle_min_points=args.static_min_points,
             )
         )
 
@@ -510,6 +518,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reset tracker when the vehicle remains stopped long enough to cut accumulated drift",
     )
     parser.add_argument("--safety-radius", type=float, default=1.0)
+    parser.add_argument("--roi-x-min", type=float, default=2.5)
+    parser.add_argument("--roi-x-max", type=float, default=15.0)
+    parser.add_argument("--roi-y-min", type=float, default=-1.1)
+    parser.add_argument("--roi-y-max", type=float, default=1.1)
+    parser.add_argument("--roi-z-min", type=float, default=-1.4)
+    parser.add_argument("--roi-z-max", type=float, default=1.0)
+    parser.add_argument("--static-min-points", type=int, default=15)
     parser.add_argument(
         "--vehicle-front",
         type=float,

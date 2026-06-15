@@ -5,6 +5,8 @@ import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
+
 from app.core.domain_types import PredictedTrajectory, TrackedPedestrian, TrajectoryPoint
 
 
@@ -24,6 +26,13 @@ class TTCWarningConfig:
     brake_ttc_scale: float = 0.70
     max_decel_mps2: float = -8.0
     max_jerk_mps3: float = 50.0
+    roi_x_min: float = 2.5
+    roi_x_max: float = 15.0
+    roi_y_min: float = -1.1
+    roi_y_max: float = 1.1
+    roi_z_min: float = -1.4
+    roi_z_max: float = 1.0
+    static_obstacle_min_points: int = 15
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,7 @@ class TTCWarningAdapter:
         timestamp_sec: float,
         tracked_objects: list[TrackedPedestrian],
         predicted_trajectories: list[PredictedTrajectory],
+        points: np.ndarray | None = None,
     ) -> list[TTCWarning]:
         if abs(self.config.ego_speed_mps) <= self.config.low_speed_suppress_mps:
             return []
@@ -86,8 +96,63 @@ class TTCWarningAdapter:
                     collision_time_sec=ttc_result.collision_time_sec,
                 )
             )
+
+        if points is not None:
+            static_warning = self.evaluate_static_obstacles(frame_id, timestamp_sec, points)
+            if static_warning is not None:
+                warnings.append(static_warning)
+
         warnings.sort(key=lambda item: item.min_ttc_sec)
         return warnings
+
+    def evaluate_static_obstacles(
+        self,
+        frame_id: int,
+        timestamp_sec: float,
+        points: np.ndarray,
+    ) -> TTCWarning | None:
+        config = self.config
+        if config.ego_speed_mps <= 0.1:
+            return None
+
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+
+        in_roi = (
+            (x >= config.roi_x_min) &
+            (x <= config.roi_x_max) &
+            (y >= config.roi_y_min) &
+            (y <= config.roi_y_max) &
+            (z >= config.roi_z_min) &
+            (z <= config.roi_z_max)
+        )
+        roi_points = points[in_roi]
+
+        if len(roi_points) < config.static_obstacle_min_points:
+            return None
+
+        distance_m = float(np.percentile(roi_points[:, 0], 5.0))
+        ttc_sec = distance_m / config.ego_speed_mps
+
+        warning_info = self.classify_warning(ttc_sec)
+        if warning_info["level"] == 0:
+            return None
+
+        accel = self.s_curve_deceleration(ttc_sec)
+        return TTCWarning(
+            frame_id=frame_id,
+            timestamp_sec=timestamp_sec,
+            track_id=-99,
+            level=warning_info["level"],
+            label="Static_Obstacle",
+            action=warning_info["action"],
+            color=warning_info["color"],
+            min_ttc_sec=ttc_sec,
+            target_accel_mps2=accel,
+            distance_m=distance_m,
+            collision_time_sec=timestamp_sec + ttc_sec,
+        )
 
     def compute_ttc(
         self,
