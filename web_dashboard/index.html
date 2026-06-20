@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADAS Real-Time HUD Dashboard</title>
+    <!-- Local Leaflet Map & Fonts -->
+    <link rel="stylesheet" href="assets/leaflet/leaflet.css" />
+    <script src="assets/leaflet/leaflet.js"></script>
+    <link rel="stylesheet" href="index.css">
+    <style>
+        /* 시스템 기본 폰트로 대체 (오프라인 구동용) */
+        :root {
+            --font-primary: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: Consolas, "Courier New", monospace;
+        }
+    </style>
+</head>
+<body>
+    <!-- Screen Emergency Glow Overlay -->
+    <div id="emergency-glow" class="glow-safe"></div>
+
+    <div class="app-container">
+        <!-- HEADER -->
+        <header class="dashboard-header">
+            <div class="logo-area">
+                <div class="status-indicator-ring"></div>
+                <h1>ADAS <span class="accent-text">HUD SYSTEM</span></h1>
+            </div>
+            <div class="system-stats">
+                <div class="stat-badge">
+                    <span class="label">FRAME:</span>
+                    <span class="value" id="hdr-frame-id">0</span>
+                </div>
+                <div class="stat-badge">
+                    <span class="label">TIME:</span>
+                    <span class="value" id="hdr-timestamp">0.00s</span>
+                </div>
+                <div class="status-badge status-offline" id="system-status">OFFLINE</div>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT -->
+        <main class="dashboard-grid">
+            <!-- LEFT PANEL: INSTRUMENTS -->
+            <section class="panel glass-panel left-panel">
+                <div class="panel-header">
+                    <h2>EGO VEHICLE INSTRUMENTS</h2>
+                </div>
+                <div class="panel-content instruments-container">
+                    <!-- SPEED GAUGE -->
+                    <div class="gauge-container">
+                        <div class="gauge-label">CURRENT SPEED</div>
+                        <div class="digital-display" id="inst-speed">0.0 <span class="unit">m/s</span></div>
+                        <div class="sub-value" id="inst-speed-kmh">0.0 km/h</div>
+                    </div>
+
+                    <!-- DRIVER PEDAL STATUS -->
+                    <div class="pedal-status-grid">
+                        <div class="pedal-card" id="pedal-accel">
+                            <div class="pedal-label">ACCEL</div>
+                            <div class="pedal-value" id="inst-accel-state">OFF</div>
+                            <div class="pedal-subvalue" id="inst-accel-value">0%</div>
+                        </div>
+                        <div class="pedal-card" id="pedal-brake">
+                            <div class="pedal-label">BRAKE</div>
+                            <div class="pedal-value" id="inst-brake-state">OFF</div>
+                            <div class="pedal-subvalue" id="inst-brake-value">lights off</div>
+                        </div>
+                    </div>
+
+                    <!-- DECELERATION GAUGE -->
+                    <div class="gauge-container">
+                        <div class="gauge-label">TARGET DECELERATION</div>
+                        <div class="digital-display warning-text" id="inst-decel">0.00 <span class="unit">m/s²</span></div>
+                        <div class="gauge-bar-bg">
+                            <div class="gauge-bar-fill" id="decel-bar" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <!-- CURRENT WARNING STATUS -->
+                    <div class="warning-banner banner-safe" id="warning-banner">
+                        <div class="banner-title" id="warn-title">SYSTEM SAFE</div>
+                        <div class="banner-action" id="warn-action">Normal driving conditions</div>
+                    </div>
+
+                    <!-- PIPELINE CONTROLS -->
+                    <div class="config-settings">
+                        <h3>SYSTEM PARAMETERS</h3>
+                        <div class="setting-row">
+                            <span class="label">Ego Speed (mps):</span>
+                            <span class="value" id="param-ego-speed">10.0</span>
+                        </div>
+                        <div class="setting-row">
+                            <span class="label">Safety Radius:</span>
+                            <span class="value" id="param-safety-radius">1.0 m</span>
+                        </div>
+                        <div class="audio-toggle-container">
+                            <button id="btn-audio-toggle" class="btn btn-secondary btn-audio-off">🔊 AUDIO: ON</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- CENTER PANEL: BEV RADAR -->
+            <section class="panel radar-panel">
+                <div class="radar-container" id="radar-container">
+                    <div id="navi-map" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;"></div>
+                    <div class="radar-hud-overlay" style="z-index: 10;">
+                        <div class="hud-angle-left"></div>
+                        <div class="hud-angle-right"></div>
+                        <div class="radar-title">ADAS 실시간 보행자 감지</div>
+                        <div class="radar-scale">GRID: 5m / DIV</div>
+                    </div>
+                    <canvas id="radar-canvas" style="position: relative; z-index: 5; pointer-events: none;"></canvas>
+                </div>
+            </section>
+
+            <!-- RIGHT PANEL: TRACKING MATRIX & LATENCY -->
+            <section class="panel glass-panel right-panel">
+                <div class="panel-header">
+                    <h2>PEDESTRIAN THREAT MATRIX</h2>
+                </div>
+                <div class="panel-content tracking-container">
+                    <!-- TRACK LIST -->
+                    <div class="track-list-wrapper">
+                        <div class="list-header">
+                            <span>ID</span>
+                            <span>DISTANCE</span>
+                            <span>TTC</span>
+                            <span>THREAT LEVEL</span>
+                        </div>
+                        <div class="track-list" id="track-list">
+                            <div class="no-tracks">No pedestrians detected</div>
+                        </div>
+                    </div>
+
+                    <!-- LATENCY BREAKDOWN -->
+                    <div class="latency-container">
+                        <h3>PIPELINE LATENCY</h3>
+                        <div class="latency-bars" id="latency-bars">
+                            <!-- Perception -->
+                            <div class="latency-bar-row">
+                                <span class="label">Perception:</span>
+                                <div class="latency-bar-fill-wrapper">
+                                    <div class="latency-fill perception-fill" id="lat-perception" style="width: 0%"></div>
+                                </div>
+                                <span class="value" id="lat-val-perception">0.0ms</span>
+                            </div>
+                            <!-- Prediction -->
+                            <div class="latency-bar-row">
+                                <span class="label">Prediction:</span>
+                                <div class="latency-bar-fill-wrapper">
+                                    <div class="latency-fill prediction-fill" id="lat-prediction" style="width: 0%"></div>
+                                </div>
+                                <span class="value" id="lat-val-prediction">0.0ms</span>
+                            </div>
+                            <!-- Tracking -->
+                            <div class="latency-bar-row">
+                                <span class="label">Tracking:</span>
+                                <div class="latency-bar-fill-wrapper">
+                                    <div class="latency-fill tracking-fill" id="lat-tracking" style="width: 0%"></div>
+                                </div>
+                                <span class="value" id="lat-val-tracking">0.0ms</span>
+                            </div>
+                            <!-- Total Pipeline -->
+                            <div class="latency-total-row">
+                                <span>TOTAL LATENCY:</span>
+                                <strong id="lat-total">0.0ms</strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- BOTTOM PANEL: PLAYBACK / SIMULATION CONTROLS -->
+        <footer class="playback-panel glass-panel">
+            <div class="control-row">
+                <!-- FILE LOADER -->
+                <div class="file-uploader" id="drop-zone">
+                    <span class="upload-icon">📂</span>
+                    <span class="upload-text">드래그 & 드롭하여 JSON 로그 시연 (tracking/prediction/ttc_warnings)</span>
+                    <input type="file" id="file-selector" multiple style="display:none;" accept=".json,.csv">
+                    <button class="btn btn-primary" id="btn-browse">파일 선택</button>
+                </div>
+
+                <!-- PLAYBACK SYSTEM -->
+                <div class="playback-controls">
+                    <button class="btn btn-control" id="btn-play-pause" disabled>▶ PLAY</button>
+                    <button class="btn btn-control" id="btn-stop" disabled>■ STOP</button>
+                    <div class="timeline-container">
+                        <input type="range" id="timeline-slider" min="0" max="100" value="0" disabled>
+                        <div class="timeline-labels">
+                            <span id="time-current">00:00</span>
+                            <span id="time-total">00:00</span>
+                        </div>
+                    </div>
+                    <div class="playback-speed">
+                        <label for="speed-select">SPEED:</label>
+                        <select id="speed-select" disabled>
+                            <option value="0.5">0.5x</option>
+                            <option value="1.0" selected>1.0x (Live Rate)</option>
+                            <option value="2.0">2.0x</option>
+                            <option value="5.0">5.0x</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="loaded-files-status" id="loaded-status">
+                <span class="badge badge-error">Offline Mode</span> 대기 중: 로컬 <code>web_server.py</code>를 실행하여 라이브로 수신하거나, 기존 artifacts JSON 파일을 업로드하세요.
+            </div>
+        </footer>
+    </div>
+
+    <!-- Main Logic script -->
+    <script src="app.js"></script>
+</body>
+</html>

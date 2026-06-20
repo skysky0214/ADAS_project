@@ -12,8 +12,12 @@ from pathlib import Path
 
 
 KPH_TO_MS = 1000.0 / 3600.0
+DEFAULT_STEER_RATIO = 14.25
 SAFETY_SILENT = 0
 ADDR_WHEEL_SPEEDS = 160
+ADDR_ACCELERATOR = 53
+ADDR_ACCELERATOR_BRAKE_ALT = 256
+ADDR_ACCELERATOR_ALT = 261
 ADDR_MDPS = 234
 ADDR_STEERING_SENSORS = 293
 ADDR_TCS = 373
@@ -26,6 +30,9 @@ class EgoMotionDelta:
     dyaw_rad: float = 0.0
     speed_mps: float = 0.0
     steering_deg: float = 0.0
+    accelerator_pressed: bool = False
+    accelerator_pedal: float = 0.0
+    accelerator_pedal_raw: int = 0
     brake_pressed: bool = False
     brake_lights: bool = False
     valid: bool = False
@@ -38,6 +45,9 @@ class _CanEgoState:
     moving_backward: bool = False
     steering_sensor_deg: float = 0.0
     mdps_steering_deg: float = 0.0
+    accelerator_pressed: bool = False
+    accelerator_pedal: float = 0.0
+    accelerator_pedal_raw: int = 0
     brake_pressed: bool = False
     brake_lights: bool = False
     seen_wheel_speeds: bool = False
@@ -91,6 +101,9 @@ class PandaEgoMotionReader:
         self._pending_dyaw_rad = 0.0
         self._latest_speed_mps = 0.0
         self._latest_steering_deg = 0.0
+        self._latest_accelerator_pressed = False
+        self._latest_accelerator_pedal = 0.0
+        self._latest_accelerator_pedal_raw = 0
         self._latest_brake_pressed = False
         self._latest_brake_lights = False
         self._has_sample = False
@@ -126,6 +139,9 @@ class PandaEgoMotionReader:
                 dyaw_rad=self._pending_dyaw_rad,
                 speed_mps=self._latest_speed_mps,
                 steering_deg=self._latest_steering_deg,
+                accelerator_pressed=self._latest_accelerator_pressed,
+                accelerator_pedal=self._latest_accelerator_pedal,
+                accelerator_pedal_raw=self._latest_accelerator_pedal_raw,
                 brake_pressed=self._latest_brake_pressed,
                 brake_lights=self._latest_brake_lights,
                 valid=self._has_sample,
@@ -225,6 +241,9 @@ class PandaEgoMotionReader:
             self._pending_dyaw_rad += float(data.get("dyaw_rad", 0.0))
             self._latest_speed_mps = float(data.get("speed_mps", 0.0))
             self._latest_steering_deg = float(data.get("steering_deg", 0.0))
+            self._latest_accelerator_pressed = bool(data.get("accelerator_pressed", False))
+            self._latest_accelerator_pedal = float(data.get("accelerator_pedal", 0.0))
+            self._latest_accelerator_pedal_raw = int(data.get("accelerator_pedal_raw", 0))
             self._latest_brake_pressed = bool(data.get("brake_pressed", False) or data.get("brake_lights", False))
             self._latest_brake_lights = bool(data.get("brake_lights", self._latest_brake_pressed))
             self._has_sample = bool(data.get("valid", False))
@@ -241,7 +260,7 @@ class PandaEgoMotionReader:
         if self.invert_steer:
             steering_deg *= -1.0
 
-        road_angle_rad = math.radians(steering_deg / max(self.steer_ratio, 1e-6))
+        road_angle_rad = math.radians(steering_deg) / max(self.steer_ratio, 1e-6)
         yaw_rate = speed_mps / max(self.wheelbase_m, 1e-6) * math.tan(road_angle_rad)
         dyaw = yaw_rate * dt
         dx = speed_mps * math.cos(0.5 * dyaw) * dt
@@ -271,6 +290,9 @@ class PandaEgoMotionReader:
             self._pending_dyaw_rad += dyaw
             self._latest_speed_mps = speed_mps
             self._latest_steering_deg = steering_deg
+            self._latest_accelerator_pressed = can_state.accelerator_pressed
+            self._latest_accelerator_pedal = can_state.accelerator_pedal
+            self._latest_accelerator_pedal_raw = can_state.accelerator_pedal_raw
             self._latest_brake_pressed = can_state.brake_pressed
             self._latest_brake_lights = can_state.brake_lights
             self._has_sample = can_state.seen_wheel_speeds or can_state.seen_steering
@@ -296,6 +318,22 @@ class PandaEgoMotionReader:
             elif addr == ADDR_MDPS and len(dat) >= 18:
                 can_state.mdps_steering_deg = self._s16_le(dat, 16) * 0.1
                 can_state.seen_steering = True
+            elif addr == ADDR_ACCELERATOR and len(dat) >= 6:
+                raw = int(dat[5])
+                can_state.accelerator_pedal_raw = raw
+                can_state.accelerator_pedal = raw / 255.0
+                can_state.accelerator_pressed = raw > 0
+            elif addr == ADDR_ACCELERATOR_ALT and len(dat) >= 15:
+                raw = ((int(dat[12]) >> 7) | (int(dat[13]) << 1) | ((int(dat[14]) & 0x01) << 9)) & 0x3FF
+                can_state.accelerator_pedal_raw = raw
+                can_state.accelerator_pedal = min(raw / 1022.0, 1.0)
+                can_state.accelerator_pressed = raw > 0 or self._bit_is_set(dat, 103) or self._bit_is_set(dat, 112)
+            elif addr == ADDR_ACCELERATOR_BRAKE_ALT and len(dat) >= 23:
+                can_state.accelerator_pressed = self._bit_is_set(dat, 176)
+                if can_state.accelerator_pressed:
+                    can_state.accelerator_pedal = max(can_state.accelerator_pedal, 1.0)
+                can_state.brake_pressed = can_state.brake_pressed or self._bit_is_set(dat, 32)
+                can_state.brake_lights = can_state.brake_lights or can_state.brake_pressed
             elif addr == ADDR_TCS and len(dat) >= 11:
                 brake_light = (dat[9] >> 2) & 0x3
                 driver_braking = (dat[10] >> 6) & 0x1
@@ -306,6 +344,12 @@ class PandaEgoMotionReader:
     @staticmethod
     def _u16_le(dat: bytes, offset: int) -> int:
         return dat[offset] | (dat[offset + 1] << 8)
+
+    @staticmethod
+    def _bit_is_set(dat: bytes, bit: int) -> bool:
+        byte_index = bit // 8
+        bit_index = bit % 8
+        return byte_index < len(dat) and bool(dat[byte_index] & (1 << bit_index))
 
     @classmethod
     def _s16_le(cls, dat: bytes, offset: int) -> int:

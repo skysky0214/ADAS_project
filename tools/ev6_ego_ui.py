@@ -32,6 +32,7 @@ from panda import Panda  # noqa: E402
 
 DBC_NAME = "hyundai_canfd_generated"
 KPH_TO_MS = 1000.0 / 3600.0
+DEFAULT_STEER_RATIO = 14.25
 
 
 @dataclass
@@ -94,7 +95,7 @@ def step_ego(parser: CANParser, ego: EgoState, dt: float, args):
   if args.invert_steer:
     steer_deg *= -1.0
 
-  road_rad = math.radians(steer_deg / args.steer_ratio)
+  road_rad = math.radians(steer_deg) / max(args.steer_ratio, 1e-6)
   yaw_rate = v / args.wheelbase * math.tan(road_rad)
 
   yaw_mid = ego.yaw + 0.5 * yaw_rate * dt
@@ -254,7 +255,7 @@ def parse_args():
   parser.add_argument("--wheelbase", type=float, default=2.900)
   parser.add_argument("--front-overhang", type=float, default=0.870)
   parser.add_argument("--rear-overhang", type=float, default=0.785)
-  parser.add_argument("--steer-ratio", type=float, default=16.0)
+  parser.add_argument("--steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
   parser.add_argument("--angle-source", choices=("sensor", "mdps"), default="sensor")
   parser.add_argument("--invert-steer", action="store_true")
   parser.add_argument("--max-dt", type=float, default=0.1)

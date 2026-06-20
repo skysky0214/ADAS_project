@@ -5,9 +5,12 @@ import math
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
 
-from app.control.ttc_warning import TTCWarning
+from app.control.ttc_warning import StaticObstacleObservation, TTCWarning
 from app.core.domain_types import PredictedTrajectory, TrackedPedestrian
-from app.ego_motion import EgoMotionDelta
+from app.ego_motion import (
+    DEFAULT_STEER_RATIO,
+    EgoMotionDelta,
+)
 
 
 def build_tracking_marker_array(
@@ -17,10 +20,11 @@ def build_tracking_marker_array(
     trajectories: list[PredictedTrajectory],
     warnings: list[TTCWarning],
     history_tail: int,
+    static_obstacle: StaticObstacleObservation | None = None,
     ego_delta: EgoMotionDelta | None = None,
     ego_compensation_enabled: bool = False,
     ego_wheelbase_m: float = 2.9,
-    ego_steer_ratio: float = 16.0,
+    ego_steer_ratio: float = DEFAULT_STEER_RATIO,
     vehicle_front_m: float = 2.4,
     vehicle_rear_m: float = 2.1,
     vehicle_side_m: float = 1.0,
@@ -51,6 +55,12 @@ def build_tracking_marker_array(
         vehicle_side_m=vehicle_side_m,
         horizon_sec=ego_prediction_horizon_sec,
         step_sec=ego_prediction_step_sec,
+    )
+    _append_static_obstacle_markers(
+        marker_array=marker_array,
+        frame_id=frame_id,
+        timestamp=timestamp,
+        static_obstacle=static_obstacle,
     )
 
     for track in tracks:
@@ -182,6 +192,54 @@ def build_tracking_marker_array(
     return marker_array
 
 
+def _append_static_obstacle_markers(
+    marker_array: MarkerArray,
+    frame_id: str,
+    timestamp,
+    static_obstacle: StaticObstacleObservation | None,
+) -> None:
+    if static_obstacle is None:
+        return
+
+    rgba = _static_obstacle_rgba(static_obstacle)
+    x_center = (static_obstacle.x_min + static_obstacle.x_max) * 0.5
+    y_center = (static_obstacle.y_min + static_obstacle.y_max) * 0.5
+    z_center = (static_obstacle.z_min + static_obstacle.z_max) * 0.5
+
+    box = _base_marker(frame_id, timestamp, "static_obstacle_candidate", 1, Marker.CUBE)
+    box.pose.position.x = float(x_center)
+    box.pose.position.y = float(y_center)
+    box.pose.position.z = float(z_center)
+    box.scale.x = max(float(static_obstacle.x_max - static_obstacle.x_min), 0.30)
+    box.scale.y = max(float(static_obstacle.y_max - static_obstacle.y_min), 0.30)
+    box.scale.z = max(float(static_obstacle.z_max - static_obstacle.z_min), 0.30)
+    _set_marker_color(box, (rgba[0], rgba[1], rgba[2], 0.28 if static_obstacle.level == 0 else 0.48))
+    marker_array.markers.append(box)
+
+    center = _base_marker(frame_id, timestamp, "static_obstacle_candidate", 2, Marker.SPHERE)
+    center.pose.position.x = float(static_obstacle.centroid_x)
+    center.pose.position.y = float(static_obstacle.centroid_y)
+    center.pose.position.z = float(static_obstacle.centroid_z)
+    center.scale.x = 0.35
+    center.scale.y = 0.35
+    center.scale.z = 0.35
+    _set_marker_color(center, (rgba[0], rgba[1], rgba[2], 0.95))
+    marker_array.markers.append(center)
+
+    ttc_text = "SUPP" if static_obstacle.suppressed_low_speed else f"TTC={static_obstacle.ttc_sec:.2f}s"
+    label = _base_marker(frame_id, timestamp, "static_obstacle_candidate", 3, Marker.TEXT_VIEW_FACING)
+    label.pose.position.x = float(static_obstacle.centroid_x)
+    label.pose.position.y = float(static_obstacle.centroid_y)
+    label.pose.position.z = float(static_obstacle.z_max + 0.8)
+    label.scale.z = 0.55
+    label.text = (
+        f"STATIC CLOUD pts={static_obstacle.point_count} "
+        f"dist={static_obstacle.distance_m:.1f}m {ttc_text} L{static_obstacle.level}"
+    )
+    _set_marker_color(label, (rgba[0], rgba[1], rgba[2], 1.0))
+    marker_array.markers.append(label)
+
+
 def _append_ego_markers(
     marker_array: MarkerArray,
     frame_id: str,
@@ -256,14 +314,30 @@ def _append_ego_markers(
     status.pose.position.z = 1.6
     status.scale.z = 0.5
     state = "ON" if ego_compensation_enabled and delta.valid else "WAIT"
+    accel_pct = max(0.0, min(1.0, float(delta.accelerator_pedal))) * 100.0
+    brake_state = "ON" if delta.brake_pressed or delta.brake_lights else "OFF"
+    accel_state = "ON" if delta.accelerator_pressed else "OFF"
     status.text = (
         f"EGO COMP {state} | v={delta.speed_mps:.2f} m/s "
-        f"steer={delta.steering_deg:.1f} deg | "
+        f"steer={delta.steering_deg:.1f} deg\n"
+        f"ACCEL={accel_state} {accel_pct:.0f}% | BRAKE={brake_state} | "
         f"d=({delta.dx_m:.3f},{delta.dy_m:.3f}) yaw={delta.dyaw_rad:.4f} "
         f"reset={delta.reset}"
     )
     _set_marker_color(status, status_color)
     marker_array.markers.append(status)
+
+
+def _static_obstacle_rgba(static_obstacle: StaticObstacleObservation) -> tuple[float, float, float, float]:
+    if static_obstacle.level == 3:
+        return (1.0, 0.0, 0.0, 1.0)
+    if static_obstacle.level == 2:
+        return (1.0, 0.55, 0.0, 1.0)
+    if static_obstacle.level == 1:
+        return (1.0, 1.0, 0.0, 1.0)
+    if static_obstacle.suppressed_low_speed:
+        return (0.55, 0.75, 1.0, 1.0)
+    return (0.0, 0.95, 1.0, 1.0)
 
 
 def _predict_ego_path(
@@ -277,7 +351,7 @@ def _predict_ego_path(
     points = [(0.0, 0.0, 0.0)]
     step = max(step_sec, 0.05)
     steps = max(1, int(max(horizon_sec, step) / step))
-    road_angle_rad = math.radians(steering_deg / max(steer_ratio, 1e-6))
+    road_angle_rad = math.radians(steering_deg) / max(steer_ratio, 1e-6)
     yaw_rate = speed_mps / max(wheelbase_m, 1e-6) * math.tan(road_angle_rad)
     x = 0.0
     y = 0.0

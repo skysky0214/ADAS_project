@@ -31,6 +31,7 @@ from panda import Panda  # noqa: E402
 
 DBC_NAME = "hyundai_canfd_generated"
 KPH_TO_MS = 1000.0 / 3600.0
+DEFAULT_STEER_RATIO = 14.25
 
 
 def make_parser(bus: int) -> CANParser:
@@ -78,7 +79,7 @@ def parse_args():
   parser.add_argument("--wheelbase", type=float, default=2.900, help="Wheelbase in meters")
   parser.add_argument("--front-overhang", type=float, default=0.870, help="Front overhang in meters")
   parser.add_argument("--rear-overhang", type=float, default=0.785, help="Rear overhang in meters")
-  parser.add_argument("--steer-ratio", type=float, default=16.0, help="Steering wheel angle / road wheel angle")
+  parser.add_argument("--steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
   parser.add_argument("--angle-source", choices=("sensor", "mdps"), default="sensor",
                       help="Use STEERING_SENSORS or MDPS angle")
   parser.add_argument("--invert-steer", action="store_true", help="Invert decoded steering sign")
@@ -164,7 +165,7 @@ def main():
       if args.invert_steer:
         steer_deg *= -1.0
 
-      road_angle_rad = math.radians(steer_deg / args.steer_ratio)
+      road_angle_rad = math.radians(steer_deg) / max(args.steer_ratio, 1e-6)
       yaw_rate = v / args.wheelbase * math.tan(road_angle_rad)
 
       # Midpoint integration is stable enough for low-rate CAN odometry.

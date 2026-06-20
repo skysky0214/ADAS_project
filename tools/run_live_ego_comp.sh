@@ -39,6 +39,7 @@ python app/main.py \
   --vehicle-rear 2.10 \
   --vehicle-side 1.00 \
   --marker-frame hesai_lidar \
+  --dashboard-url "${ADAS_DASHBOARD_URL:-http://localhost:8000/api/frame}" \
   --output-dir artifacts/live_ego_comp \
   --print-every 20 \
   "$@"

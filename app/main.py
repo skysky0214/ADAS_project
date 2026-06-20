@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import sys
 import time
@@ -17,8 +18,13 @@ if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import PipelineConfig
-from app.ego_motion import EgoMotionDelta, PandaEgoMotionReader
+from app.ego_motion import (
+    DEFAULT_STEER_RATIO,
+    EgoMotionDelta,
+    PandaEgoMotionReader,
+)
 from app.control.ttc_warning import (
+    StaticObstacleObservation,
     TTCWarning,
     TTCWarningAdapter,
     TTCWarningConfig,
@@ -46,6 +52,7 @@ from app.bridge.planner_interface import build_planner_snapshot
 from app.perception.pedestrian_filter import filter_pedestrians
 from app.pipeline import RealTimePedestrianTrackingPipeline
 from app.prediction.input_builder import build_prediction_input
+from app.visualization.dashboard_client import DashboardPublisher
 from app.visualization.rviz_markers import build_tracking_marker_array
 
 
@@ -65,6 +72,8 @@ class DSVTTrackingNode(Node):
         self.first_receive_wall_sec: float | None = None
         self.stop_requested = False
         self.outputs_saved = False
+        self.dashboard_publisher = None
+        self.dashboard_error_reported = False
 
         config = PipelineConfig(
             perception_name=f"openpcdet_{args.perception}",
@@ -81,6 +90,13 @@ class DSVTTrackingNode(Node):
         if not args.no_rviz:
             self.marker_publisher = self.create_publisher(MarkerArray, args.marker_topic, 10)
             self.get_logger().info(f"Publishing RViz markers on {args.marker_topic}")
+        if args.dashboard_url:
+            self.dashboard_publisher = DashboardPublisher(
+                url=args.dashboard_url,
+                timeout_sec=args.dashboard_timeout_sec,
+                max_queue=args.dashboard_queue_size,
+            )
+            self.get_logger().info(f"Publishing browser dashboard frames to {args.dashboard_url}")
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -139,6 +155,7 @@ class DSVTTrackingNode(Node):
                 self.warning_adapter.config,
                 ego_speed_mps=ego_delta.speed_mps,
                 driver_brake_pressed=ego_delta.brake_pressed,
+                driver_accelerator_pressed=ego_delta.accelerator_pressed,
             )
         ego_config_ms = _elapsed_ms(stage_start)
         stage_start = time.perf_counter()
@@ -203,6 +220,7 @@ class DSVTTrackingNode(Node):
             predicted_trajectories=trajectories,
             points=raw_points,
         )
+        static_obstacle = self.warning_adapter.latest_static_obstacle
         self.ttc_warnings.extend(warnings)
         warning_ms = _elapsed_ms(stage_start)
         marker_build_ms = 0.0
@@ -217,6 +235,7 @@ class DSVTTrackingNode(Node):
                 tracks=result.tracks,
                 trajectories=trajectories,
                 warnings=warnings,
+                static_obstacle=static_obstacle,
                 history_tail=self.args.marker_history_tail,
                 ego_delta=ego_delta,
                 ego_compensation_enabled=self.args.ego_compensation,
@@ -297,6 +316,9 @@ class DSVTTrackingNode(Node):
             "ego_motion_reset": ego_delta.reset,
             "ego_speed_mps": ego_delta.speed_mps,
             "ego_steering_deg": ego_delta.steering_deg,
+            "ego_accelerator_pressed": ego_delta.accelerator_pressed,
+            "ego_accelerator_pedal": ego_delta.accelerator_pedal,
+            "ego_accelerator_pedal_raw": ego_delta.accelerator_pedal_raw,
             "ego_brake_pressed": ego_delta.brake_pressed,
             "ego_brake_lights": ego_delta.brake_lights,
             "ego_delta_x_m": ego_delta.dx_m,
@@ -331,6 +353,7 @@ class DSVTTrackingNode(Node):
             )
         )
         latency_row["unaccounted_ms"] = total_ms - accounted_ms
+        self._publish_dashboard_frame(result, trajectories, warnings, static_obstacle, latency_row, ego_delta)
 
         if frame_id % self.args.print_every == 0:
             playback_lag_ms = self._playback_lag_ms(timestamp_sec, receive_wall_sec)
@@ -339,6 +362,7 @@ class DSVTTrackingNode(Node):
                 ego_text = (
                     f" ego_v={ego_delta.speed_mps:.2f}mps ego_dx={ego_delta.dx_m:.3f}m "
                     f"ego_yaw={ego_delta.dyaw_rad:.4f}rad ego_brake={ego_delta.brake_pressed} "
+                    f"ego_accel={ego_delta.accelerator_pressed} "
                     f"ego_reset={ego_delta.reset}"
                 )
             self.get_logger().info(
@@ -394,6 +418,8 @@ class DSVTTrackingNode(Node):
             model = SRLSTMPredictionModel(
                 checkpoint=config.srlstm_checkpoint,
                 sensor_fps=args.prediction_fps,
+                smooth_alpha=args.prediction_smooth_alpha,
+                max_pedestrian_speed=args.prediction_max_speed,
             )
             self.get_logger().info("SR-LSTM prediction model loaded.")
             return model
@@ -409,6 +435,7 @@ class DSVTTrackingNode(Node):
                 vehicle_rear_m=args.vehicle_rear,
                 vehicle_side_m=args.vehicle_side,
                 low_speed_suppress_mps=args.ttc_low_speed_kph / 3.6,
+                perception_low_speed_suppress_mps=args.ttc_perception_low_speed_kph / 3.6,
                 brake_ttc_scale=args.ttc_brake_threshold_scale,
                 roi_x_min=args.roi_x_min,
                 roi_x_max=args.roi_x_max,
@@ -465,7 +492,47 @@ class DSVTTrackingNode(Node):
         expected_wall_elapsed = msg_elapsed / max(self.args.latency_playback_rate, 1e-6)
         return (wall_elapsed - expected_wall_elapsed) * 1000.0
 
+    def _publish_dashboard_frame(
+        self,
+        result: TrackingFrameResult,
+        trajectories,
+        warnings: list[TTCWarning],
+        static_obstacle: StaticObstacleObservation | None,
+        latency_row: dict,
+        ego_delta: EgoMotionDelta,
+    ) -> None:
+        if self.dashboard_publisher is None:
+            return
+
+        payload = {
+            "frame_id": result.frame_id,
+            "timestamp_sec": result.timestamp_sec,
+            "ego_speed_mps": ego_delta.speed_mps,
+            "ego_steering_deg": ego_delta.steering_deg,
+            "ego_accelerator_pressed": ego_delta.accelerator_pressed,
+            "ego_accelerator_pedal": ego_delta.accelerator_pedal,
+            "ego_accelerator_pedal_raw": ego_delta.accelerator_pedal_raw,
+            "ego_brake_pressed": ego_delta.brake_pressed,
+            "ego_brake_lights": ego_delta.brake_lights,
+            "safety_radius_m": self.args.safety_radius,
+            "tracks": [asdict(track) for track in result.tracks],
+            "trajectories": [asdict(trajectory) for trajectory in trajectories],
+            "warnings": [asdict(warning) for warning in warnings],
+            "static_obstacle": asdict(static_obstacle) if static_obstacle is not None else None,
+            "latency": latency_row,
+        }
+        self.dashboard_publisher.publish(_json_safe(payload))
+
+        if self.dashboard_publisher.last_error and not self.dashboard_error_reported:
+            self.get_logger().warning(
+                f"Dashboard publish failed once: {self.dashboard_publisher.last_error}"
+            )
+            self.dashboard_error_reported = True
+
     def close(self) -> None:
+        if self.dashboard_publisher is not None:
+            self.dashboard_publisher.close()
+            self.dashboard_publisher = None
         if self.ego_reader is not None:
             self.ego_reader.stop()
             self.ego_reader = None
@@ -487,6 +554,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prediction", choices=["none", "srlstm"], default="none")
     parser.add_argument("--prediction-fps", type=float, default=2.5)
     parser.add_argument(
+        "--prediction-smooth-alpha",
+        type=float,
+        default=0.4,
+        help="EMA smoothing factor for predicted trajectories (0=full smooth, 1=no smooth)",
+    )
+    parser.add_argument(
+        "--prediction-max-speed",
+        type=float,
+        default=3.0,
+        help="Max pedestrian speed for trajectory clamping in m/s",
+    )
+    parser.add_argument(
         "--latency-playback-rate",
         type=float,
         default=1.0,
@@ -505,7 +584,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ego-data-speed", type=int, default=2000, help="Ego CAN-FD data speed in kbps")
     parser.add_argument("--ego-no-config", action="store_true", help="Do not configure Panda CAN-FD speeds for ego reader")
     parser.add_argument("--ego-wheelbase", type=float, default=2.900)
-    parser.add_argument("--ego-steer-ratio", type=float, default=16.0)
+    parser.add_argument("--ego-steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
     parser.add_argument("--ego-angle-source", choices=("sensor", "mdps"), default="sensor")
     parser.add_argument("--ego-invert-steer", action="store_true")
     parser.add_argument("--ego-max-dt", type=float, default=0.1)
@@ -542,7 +621,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--ttc-low-speed-kph",
         type=float,
         default=10.0,
-        help="Suppress TTC warnings at or below this ego speed in km/h",
+        help="Suppress prediction-based TTC warnings at or below this ego speed in km/h",
+    )
+    parser.add_argument(
+        "--ttc-perception-low-speed-kph",
+        type=float,
+        default=5.0,
+        help="Suppress perception/static-obstacle TTC warnings at or below this ego speed in km/h",
     )
     parser.add_argument(
         "--ttc-brake-threshold-scale",
@@ -556,6 +641,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ego-marker-horizon", type=float, default=3.0, help="Seconds of predicted ego path to draw in RViz")
     parser.add_argument("--ego-marker-step", type=float, default=0.2, help="Time step for RViz ego path markers")
     parser.add_argument("--no-rviz", action="store_true")
+    parser.add_argument(
+        "--dashboard-url",
+        default=None,
+        help="Optional browser dashboard endpoint, e.g. http://localhost:8000/api/frame",
+    )
+    parser.add_argument("--dashboard-timeout-sec", type=float, default=0.03)
+    parser.add_argument("--dashboard-queue-size", type=int, default=2)
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser
 
@@ -581,6 +673,16 @@ def _filter_detections_by_roi(detections, roi_m: float):
         for det in detections
         if (det.x * det.x) + (det.y * det.y) <= roi_sq
     ]
+
+
+def _json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def main() -> None:
