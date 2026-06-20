@@ -26,6 +26,9 @@ let appState = {
     frames: [], // Replay Mode: combined frames
     latestLiveFrame: null,
     liveStreamSource: null,
+    roiDirty: false,
+    roiApplyPending: false,
+    pendingRoiConfig: null,
 
     // Audio Context for direct warning synthesis
     audioCtx: null,
@@ -54,6 +57,16 @@ const el = {
     warnAction: document.getElementById("warn-action"),
     paramEgoSpeed: document.getElementById("param-ego-speed"),
     paramSafetyRadius: document.getElementById("param-safety-radius"),
+    roiStaticXMin: document.getElementById("roi-static-x-min"),
+    roiStaticXMax: document.getElementById("roi-static-x-max"),
+    roiStaticYMin: document.getElementById("roi-static-y-min"),
+    roiStaticYMax: document.getElementById("roi-static-y-max"),
+    roiStaticZMin: document.getElementById("roi-static-z-min"),
+    roiStaticZMax: document.getElementById("roi-static-z-max"),
+    btnApplyRoi: document.getElementById("btn-apply-roi"),
+    roiStatus: document.getElementById("roi-status"),
+    roiAppliedStatic: document.getElementById("roi-applied-static"),
+    radarScale: document.getElementById("radar-scale"),
     btnAudioToggle: document.getElementById("btn-audio-toggle"),
     radarCanvas: document.getElementById("radar-canvas"),
     radarContainer: document.getElementById("radar-container"),
@@ -88,11 +101,13 @@ let ctx = el.radarCanvas.getContext("2d");
 const RADAR_SCALE = 12; // 1 meter = 12 pixels
 let canvasCenter = { x: 0, y: 0 };
 let egoCarPos = { x: 0, y: 0 };
+appState.bevScale = RADAR_SCALE;
 
 // Initialize App
 window.addEventListener("DOMContentLoaded", () => {
     initCanvas();
     setupEventListeners();
+    loadRuntimeRoiConfig();
     setupLiveSSE();
 
     // Run drawing loop
@@ -215,6 +230,17 @@ function setupEventListeners() {
         appState.playbackSpeed = parseFloat(e.target.value);
     });
 
+    roiEditableElements().forEach((control) => {
+        control.addEventListener("input", () => {
+            appState.roiDirty = true;
+            setRoiStatus("Edited", "pending");
+        });
+    });
+
+    if (el.btnApplyRoi) {
+        el.btnApplyRoi.addEventListener("click", applyRuntimeRoiConfig);
+    }
+
     // Drag and Drop files
     el.dropZone.addEventListener("dragover", (e) => {
         e.preventDefault();
@@ -232,6 +258,152 @@ function setupEventListeners() {
             processDroppedFiles(e.dataTransfer.files);
         }
     });
+}
+
+async function loadRuntimeRoiConfig() {
+    if (!hasRoiControls()) return;
+    try {
+        const response = await fetch("/api/roi", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        setRoiInputs(data.config || {});
+        appState.roiDirty = false;
+        appState.roiApplyPending = false;
+        appState.pendingRoiConfig = null;
+        setRoiStatus("Ready", "ready");
+    } catch (err) {
+        console.warn("Failed to load ROI config:", err);
+        setRoiStatus("Config unavailable", "error");
+    }
+}
+
+async function applyRuntimeRoiConfig() {
+    const config = collectRoiInputs();
+    if (!config) return;
+
+    if (el.btnApplyRoi) el.btnApplyRoi.disabled = true;
+    setRoiStatus("Applying...", "pending");
+    try {
+        const response = await fetch("/api/roi", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(config)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        const appliedConfig = data.config || config;
+        setRoiInputs(appliedConfig);
+        appState.roiDirty = false;
+        appState.roiApplyPending = true;
+        appState.pendingRoiConfig = appliedConfig;
+        setRoiStatus("Waiting live...", "pending");
+    } catch (err) {
+        console.error("Failed to apply ROI config:", err);
+        setRoiStatus("Apply failed", "error");
+    } finally {
+        if (el.btnApplyRoi) el.btnApplyRoi.disabled = false;
+    }
+}
+
+function collectRoiInputs() {
+    const fields = roiFieldMap();
+    if (Object.values(fields).some((input) => !input)) {
+        setRoiStatus("ROI controls unavailable", "error");
+        return null;
+    }
+    const config = {};
+    for (const [key, input] of Object.entries(fields)) {
+        const value = Number.parseFloat(input.value);
+        if (!Number.isFinite(value)) {
+            setRoiStatus(`Invalid ${key}`, "error");
+            input.focus();
+            return null;
+        }
+        config[key] = value;
+    }
+    for (const [minKey, maxKey] of [
+        ["static_roi_x_min", "static_roi_x_max"],
+        ["static_roi_y_min", "static_roi_y_max"],
+        ["static_roi_z_min", "static_roi_z_max"]
+    ]) {
+        if (config[minKey] > config[maxKey]) {
+            setRoiStatus(`${minKey} > ${maxKey}`, "error");
+            fields[minKey].focus();
+            return null;
+        }
+    }
+    return config;
+}
+
+function setRoiInputs(config) {
+    const fields = roiFieldMap();
+    for (const [key, input] of Object.entries(fields)) {
+        if (!input) continue;
+        if (config[key] === undefined || config[key] === null) continue;
+        const value = Number(config[key]);
+        if (Number.isFinite(value)) input.value = value.toFixed(2);
+    }
+    updateAppliedRoiSummary(config);
+}
+
+function roiFieldMap() {
+    return {
+        static_roi_x_min: el.roiStaticXMin,
+        static_roi_x_max: el.roiStaticXMax,
+        static_roi_y_min: el.roiStaticYMin,
+        static_roi_y_max: el.roiStaticYMax,
+        static_roi_z_min: el.roiStaticZMin,
+        static_roi_z_max: el.roiStaticZMax
+    };
+}
+
+function hasRoiControls() {
+    return Object.values(roiFieldMap()).every(Boolean) &&
+        Boolean(el.roiStatus && el.roiAppliedStatic);
+}
+
+function setRoiStatus(text, state) {
+    if (!el.roiStatus) return;
+    el.roiStatus.textContent = text;
+    el.roiStatus.className = `roi-status ${state || "ready"}`;
+}
+
+function isRoiInputFocused() {
+    return roiEditableElements().includes(document.activeElement);
+}
+
+function isRoiEditingLocked() {
+    return appState.roiDirty || appState.roiApplyPending || isRoiInputFocused();
+}
+
+function roiEditableElements() {
+    return Object.values(roiFieldMap()).filter(Boolean);
+}
+
+function roiConfigsMatch(actual, expected) {
+    if (!actual || !expected) return false;
+    const keys = Object.keys(roiFieldMap());
+    return keys.every((key) => {
+        const a = Number(actual[key]);
+        const b = Number(expected[key]);
+        return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 0.02;
+    });
+}
+
+function updateAppliedRoiSummary(config) {
+    const s = {
+        xMin: Number(config.static_roi_x_min),
+        xMax: Number(config.static_roi_x_max),
+        yMin: Number(config.static_roi_y_min),
+        yMax: Number(config.static_roi_y_max),
+        zMin: Number(config.static_roi_z_min),
+        zMax: Number(config.static_roi_z_max)
+    };
+    if (Object.values(s).every(Number.isFinite)) {
+        if (el.roiAppliedStatic) {
+            el.roiAppliedStatic.textContent = `X ${s.xMin.toFixed(1)}~${s.xMax.toFixed(1)} | Y ${s.yMin.toFixed(1)}~${s.yMax.toFixed(1)} | Z ${s.zMin.toFixed(1)}~${s.zMax.toFixed(1)}`;
+        }
+    }
 }
 
 // SETUP LIVE ROS2 EVENT SOURCE (SSE Streaming)
@@ -496,6 +668,18 @@ function renderFrame(frame) {
     el.instSpeedKmh.textContent = `${(speed * 3.6).toFixed(1)} km/h`;
     el.paramEgoSpeed.textContent = speed.toFixed(1);
     el.paramSafetyRadius.textContent = `${appState.safetyRadius.toFixed(1)} m`;
+    if (frame.roi_config) {
+        updateAppliedRoiSummary(frame.roi_config);
+        if (appState.roiApplyPending && roiConfigsMatch(frame.roi_config, appState.pendingRoiConfig)) {
+            appState.roiApplyPending = false;
+            appState.roiDirty = false;
+            appState.pendingRoiConfig = null;
+            setRoiInputs(frame.roi_config);
+            setRoiStatus("Live applied", "ok");
+        } else if (!isRoiEditingLocked()) {
+            setRoiInputs(frame.roi_config);
+        }
+    }
 
     const acceleratorValue = Number(frame.ego_accelerator_pedal);
     const acceleratorPedal = Number.isFinite(acceleratorValue) ? Math.max(0, Math.min(1, acceleratorValue)) : 0.0;
@@ -658,22 +842,23 @@ function updateLatencyUI(lat) {
     el.latTotal.textContent = `${total.toFixed(1)}ms`;
 }
 
-// DRAW THE BIRD'S EYE VIEW (BEV) INFOTAINMENT NAVIGATION SCREEN
+// DRAW THE BIRD'S EYE VIEW (BEV) LIDAR POINT CLOUD SCREEN
 function drawRadar(frame) {
     // Clear canvas
     ctx.clearRect(0, 0, el.radarCanvas.width, el.radarCanvas.height);
 
     const w = el.radarCanvas.width;
     const h = el.radarCanvas.height;
+    appState.bevScale = computeBevScale(frame, w, h);
 
-    // 1. Draw Stylized Modern Navigation Road lines scrolling down
-    drawNavigationHighway(w, h);
+    // 1. Draw LiDAR map background, grid, ROI boundaries, and point cloud
+    drawLidarPointCloudScene(frame, w, h);
 
     // 2. Draw Safety Zone Radius Area (glowing bounds)
     drawSafetyZones();
 
-    // 3. Draw ego vehicle at bottom center
-    drawEgoCar();
+    // 3. Draw ego vehicle footprint and LiDAR origin
+    drawEgoCar(frame);
 
     // 4. Draw static obstacle cloud candidate before pedestrians
     drawStaticObstacleCluster(frame.static_obstacle);
@@ -788,6 +973,8 @@ function drawRadar(frame) {
             ctx.fillText(`ID ${tid}`, pCanvas.x - 10, pCanvas.y - 14);
         }
     });
+
+    drawCanvasStatus(frame);
 }
 
 function drawStaticObstacleCluster(obstacle) {
@@ -823,7 +1010,7 @@ function drawStaticObstacleCluster(obstacle) {
     ctx.shadowBlur = 0;
 
     const ttcText = isSuppressed ? "SUPP" : (Number.isFinite(obstacle.ttc_sec) ? `TTC ${obstacle.ttc_sec.toFixed(1)}s` : "TTC inf");
-    const label = `STATIC ${obstacle.point_count}pts ${obstacle.distance_m.toFixed(1)}m ${ttcText}`;
+    const label = `STATIC ${obstacle.point_count}pts front ${obstacle.distance_m.toFixed(1)}m ${ttcText}`;
     ctx.font = "bold 11px Outfit, 'Noto Sans KR', sans-serif";
     const textWidth = ctx.measureText(label).width;
     const labelX = Math.max(8, Math.min(center.x - textWidth / 2 - 6, el.radarCanvas.width - textWidth - 16));
@@ -845,6 +1032,207 @@ function staticObstacleColor(obstacle) {
     if (obstacle.level === 1) return { stroke: "#fbbf24", fill: "rgba(251, 191, 36, 0.18)" };
     if (obstacle.suppressed_low_speed) return { stroke: "#60a5fa", fill: "rgba(96, 165, 250, 0.14)" };
     return { stroke: "#00f2fe", fill: "rgba(0, 242, 254, 0.14)" };
+}
+
+function computeBevScale(frame, w, h) {
+    const roi = frame.roi_config || {};
+    const bounds = staticRoiBounds(roi);
+    const xMax = Math.max(bounds.xMax, 18.0);
+    const yAbs = Math.max(Math.abs(bounds.yMin), Math.abs(bounds.yMax), 4.0);
+    const scaleByX = (h - 150) / Math.max(xMax + 1.0, 6.0);
+    const scaleByY = (w * 0.46) / yAbs;
+    return Math.max(10, Math.min(34, Math.min(scaleByX, scaleByY)));
+}
+
+function drawLidarPointCloudScene(frame, w, h) {
+    const roi = frame.roi_config || {};
+    drawLidarBackground(w, h);
+    drawMetricGrid(frame, w, h);
+    const bounds = staticRoiBounds(roi);
+    drawRoiBox(roi, "static", {
+        xMin: bounds.xMin,
+        xMax: bounds.xMax,
+        yMin: bounds.yMin,
+        yMax: bounds.yMax
+    });
+    drawPointCloud(frame.pointcloud || {}, roi);
+}
+
+function drawLidarBackground(w, h) {
+    const gradient = ctx.createRadialGradient(w * 0.5, h * 0.56, 40, w * 0.5, h * 0.56, Math.max(w, h) * 0.8);
+    gradient.addColorStop(0, "#101722");
+    gradient.addColorStop(0.5, "#090d13");
+    gradient.addColorStop(1, "#05070a");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.035)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x < w; x += 36) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+    }
+    for (let y = 0; y < h; y += 36) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function drawMetricGrid(frame, w, h) {
+    const roi = frame.roi_config || {};
+    const bounds = staticRoiBounds(roi);
+    const xMax = Math.ceil(Math.max(bounds.xMax, 18));
+    const yMin = Math.floor(Math.min(bounds.yMin, -4));
+    const yMax = Math.ceil(Math.max(bounds.yMax, 4));
+
+    ctx.save();
+    ctx.font = "10px Share Tech Mono";
+    ctx.lineWidth = 1;
+
+    for (let x = 0; x <= xMax; x += 5) {
+        const start = toCanvasCoords(x, yMin);
+        const end = toCanvasCoords(x, yMax);
+        ctx.strokeStyle = x === 0 ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.055)";
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.fillText(`${x}m`, Math.min(Math.max(end.x + 4, 6), w - 36), end.y - 4);
+    }
+
+    for (let y = Math.ceil(yMin); y <= yMax; y += 1) {
+        const start = toCanvasCoords(0, y);
+        const end = toCanvasCoords(xMax, y);
+        ctx.strokeStyle = y === 0 ? "rgba(0,242,254,0.32)" : "rgba(255,255,255,0.04)";
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function drawRoiBox(roi, type, bounds) {
+    const xMin = Number(bounds.xMin);
+    const xMax = Number(bounds.xMax);
+    const yMin = Number(bounds.yMin);
+    const yMax = Number(bounds.yMax);
+    if (![xMin, xMax, yMin, yMax].every(Number.isFinite)) return;
+
+    const a = toCanvasCoords(xMin, yMax);
+    const b = toCanvasCoords(xMax, yMin);
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    const width = Math.abs(b.x - a.x);
+    const height = Math.abs(b.y - a.y);
+
+    ctx.save();
+    ctx.setLineDash([7, 5]);
+    ctx.strokeStyle = "rgba(251,191,36,0.75)";
+    ctx.fillStyle = "rgba(251,191,36,0.035)";
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeRect(x, y, width, height);
+    ctx.setLineDash([]);
+    ctx.font = "bold 10px Share Tech Mono";
+    ctx.fillStyle = "rgba(251,191,36,0.9)";
+    ctx.fillText("STATIC ROI", x + 7, y + 15);
+    ctx.restore();
+}
+
+function staticRoiBounds(roi) {
+    return {
+        xMin: finiteOr(roi.static_roi_x_min, 2.5),
+        xMax: finiteOr(roi.static_roi_x_max, 15.0),
+        yMin: finiteOr(roi.static_roi_y_min, -1.1),
+        yMax: finiteOr(roi.static_roi_y_max, 1.1),
+        zMin: finiteOr(roi.static_roi_z_min, -0.9),
+        zMax: finiteOr(roi.static_roi_z_max, 0.0)
+    };
+}
+
+function drawPointCloud(pointcloud, roi) {
+    const points = Array.isArray(pointcloud.points) ? pointcloud.points : [];
+    if (points.length === 0) return;
+
+    const bounds = staticRoiBounds(roi);
+    const zMin = bounds.zMin;
+    const zMax = bounds.zMax;
+    const zSpan = Math.max(zMax - zMin, 0.01);
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const point of points) {
+        const x = Number(point[0]);
+        const y = Number(point[1]);
+        const z = Number(point[2]);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        const p = toCanvasCoords(x, y);
+        if (p.x < -3 || p.x > el.radarCanvas.width + 3 || p.y < -3 || p.y > el.radarCanvas.height + 3) continue;
+        const t = Math.max(0, Math.min(1, (z - zMin) / zSpan));
+        const hue = 185 - t * 95;
+        const alpha = 0.30 + t * 0.42;
+        const size = t > 0.62 ? 2.0 : 1.4;
+        ctx.fillStyle = `hsla(${hue}, 95%, ${58 + t * 16}%, ${alpha})`;
+        ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    }
+    ctx.restore();
+}
+
+function drawCanvasStatus(frame) {
+    const pointcloud = frame.pointcloud || {};
+    const sampled = Number(pointcloud.sampled || 0);
+    const total = Number(pointcloud.total || 0);
+    const roi = frame.roi_config || {};
+    const staticLabel = `S X${formatRoiValue(roi.static_roi_x_min)}~${formatRoiValue(roi.static_roi_x_max)} Y${formatRoiValue(roi.static_roi_y_min)}~${formatRoiValue(roi.static_roi_y_max)} Z${formatRoiValue(roi.static_roi_z_min)}~${formatRoiValue(roi.static_roi_z_max)}`;
+    if (el.radarScale) {
+        el.radarScale.textContent = `POINTS ${sampled}/${total} | SCALE ${appState.bevScale.toFixed(1)} px/m`;
+    }
+
+    ctx.save();
+    const lines = [
+        `POINT CLOUD ${sampled}/${total}`,
+        staticLabel
+    ];
+    const maxTextWidth = Math.max(120, el.radarCanvas.width - 46);
+    let fontSize = 11;
+    ctx.font = `bold ${fontSize}px Share Tech Mono`;
+    while (fontSize > 8 && Math.max(...lines.map((line) => ctx.measureText(line).width)) > maxTextWidth) {
+        fontSize -= 1;
+        ctx.font = `bold ${fontSize}px Share Tech Mono`;
+    }
+    const width = Math.min(el.radarCanvas.width - 24, Math.max(...lines.map((line) => ctx.measureText(line).width)) + 22);
+    const x = 12;
+    const y = 48;
+    ctx.fillStyle = "rgba(2, 6, 12, 0.78)";
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, width, 48, 5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(226, 232, 240, 0.92)";
+    lines.forEach((line, index) => {
+        ctx.fillText(line, x + 11, y + 18 + index * 18);
+    });
+    ctx.restore();
+}
+
+function finiteOr(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function formatRoiValue(value, digits = 1) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits) : "--";
 }
 
 // Draw a beautiful perspective digital roadway map that scrolls dynamically
@@ -937,69 +1325,54 @@ function drawNavigationHighway(w, h) {
     }
 }
 
-// Draw Ego Vehicle Symbol at the bottom
-function drawEgoCar() {
-    const cx = egoCarPos.x;
-    const cy = egoCarPos.y;
+// Draw Ego Vehicle footprint and LiDAR origin
+function drawEgoCar(frame) {
+    const roi = frame.roi_config || {};
+    const front = finiteOr(roi.vehicle_front_m, 2.4);
+    const rear = finiteOr(roi.vehicle_rear_m, 2.1);
+    const side = finiteOr(roi.vehicle_side_m, 1.0);
 
-    // Headlight cones extending forward (stylized FOV)
-    const gradient = ctx.createRadialGradient(cx, cy, 5, cx, cy - 80, 100);
-    gradient.addColorStop(0, "rgba(0, 242, 254, 0.12)");
-    gradient.addColorStop(1, "rgba(0, 242, 254, 0)");
+    const frontLeft = toCanvasCoords(front, side);
+    const frontRight = toCanvasCoords(front, -side);
+    const rearRight = toCanvasCoords(-rear, -side);
+    const rearLeft = toCanvasCoords(-rear, side);
 
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx - 50, cy - 100);
-    ctx.lineTo(cx + 50, cy - 100);
-    ctx.closePath();
-    ctx.fillStyle = gradient;
-    ctx.fill();
-
-    // Glowing Ego vehicle outline
+    ctx.save();
     ctx.shadowColor = "#00f2fe";
-    ctx.shadowBlur = 10;
-
-    // Car Body Draw
-    ctx.fillStyle = "#1e293b";
-    ctx.strokeStyle = "#00f2fe";
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+    ctx.strokeStyle = "rgba(0, 242, 254, 0.9)";
     ctx.lineWidth = 2;
-
     ctx.beginPath();
-    // Front bumper
-    ctx.moveTo(cx - 10, cy - 25);
-    ctx.lineTo(cx + 10, cy - 25);
-    // Right side
-    ctx.lineTo(cx + 14, cy - 15);
-    ctx.lineTo(cx + 14, cy + 18);
-    // Rear bumper
-    ctx.lineTo(cx + 10, cy + 22);
-    ctx.lineTo(cx - 10, cy + 22);
-    // Left side
-    ctx.lineTo(cx - 14, cy + 18);
-    ctx.lineTo(cx - 14, cy - 15);
+    ctx.moveTo(frontLeft.x, frontLeft.y);
+    ctx.lineTo(frontRight.x, frontRight.y);
+    ctx.lineTo(rearRight.x, rearRight.y);
+    ctx.lineTo(rearLeft.x, rearLeft.y);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
 
-    // Reset shadow
+    const lidar = toCanvasCoords(0, 0);
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = "#00f2fe";
+    ctx.beginPath();
+    ctx.arc(lidar.x, lidar.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Windshield / Glass
-    ctx.fillStyle = "rgba(0, 242, 254, 0.4)";
-    ctx.beginPath();
-    ctx.moveTo(cx - 8, cy - 12);
-    ctx.lineTo(cx + 8, cy - 12);
-    ctx.lineTo(cx + 6, cy - 3);
-    ctx.lineTo(cx - 6, cy - 3);
-    ctx.closePath();
-    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.74)";
+    ctx.font = "bold 10px Share Tech Mono";
+    ctx.fillText("LiDAR", lidar.x + 7, lidar.y - 7);
+    ctx.fillStyle = "rgba(0,242,254,0.8)";
+    ctx.fillText("EGO FOOTPRINT", Math.min(frontRight.x + 8, el.radarCanvas.width - 110), frontRight.y + 13);
+    ctx.restore();
 }
 
 // Draw Safe braking boundary lines on road
 function drawSafetyZones() {
     const cy = egoCarPos.y;
     // Map safety radius (meters to pixels)
-    const sRadPx = appState.safetyRadius * RADAR_SCALE;
+    const sRadPx = appState.safetyRadius * (appState.bevScale || RADAR_SCALE);
 
     ctx.beginPath();
     // Safety bounding lateral lines extending forward
@@ -1021,11 +1394,12 @@ function toCanvasCoords(relX, relY) {
     // relY: lateral distance (+ represents left of car in meters, - represents right)
 
     // Map forward distance to visual Y (going up the canvas from Ego vehicle)
-    const cy = egoCarPos.y - (relX * RADAR_SCALE);
+    const scale = appState.bevScale || RADAR_SCALE;
+    const cy = egoCarPos.y - (relX * scale);
 
     // Map lateral distance to visual X (left is -Y in visual coordinates, right is +Y. Wait:
     // LiDAR Y positive is LEFT, so positive Y subtracts from EgoCarX)
-    const cx = egoCarPos.x - (relY * RADAR_SCALE);
+    const cx = egoCarPos.x - (relY * scale);
 
     return { x: cx, y: cy };
 }

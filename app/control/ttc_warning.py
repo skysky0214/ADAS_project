@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from app.core.config import DEFAULT_STATIC_ROI_Z_MAX_M, DEFAULT_STATIC_ROI_Z_MIN_M
 from app.core.domain_types import PredictedTrajectory, TrackedPedestrian, TrajectoryPoint
 
 
@@ -16,8 +17,12 @@ class TTCWarningConfig:
     level2_ttc_sec: float = 1.50
     level3_ttc_sec: float = 0.80
     prediction_dt_sec: float = 0.4
+    ttc_horizon_sec: float = 6.0
     safety_radius_m: float = 1.0
     ego_speed_mps: float = 10.0
+    ego_steering_deg: float = 0.0
+    ego_wheelbase_m: float = 2.90
+    ego_steer_ratio: float = 14.25
     vehicle_front_m: float = 2.40
     vehicle_rear_m: float = 2.10
     vehicle_side_m: float = 1.00
@@ -32,8 +37,8 @@ class TTCWarningConfig:
     roi_x_max: float = 15.0
     roi_y_min: float = -1.1
     roi_y_max: float = 1.1
-    roi_z_min: float = -1.4
-    roi_z_max: float = 1.0
+    roi_z_min: float = DEFAULT_STATIC_ROI_Z_MIN_M
+    roi_z_max: float = DEFAULT_STATIC_ROI_Z_MAX_M
     static_obstacle_min_points: int = 15
     static_cluster_bin_m: float = 0.40
     static_cluster_min_cell_points: int = 3
@@ -48,6 +53,10 @@ class TTCWarning:
     label: str
     action: str
     color: str
+    normal_level: int
+    normal_label: str
+    normal_action: str
+    normal_color: str
     min_ttc_sec: float
     target_accel_mps2: float
     distance_m: float
@@ -94,33 +103,34 @@ class TTCWarningAdapter:
         predicted_trajectories: list[PredictedTrajectory],
         points: np.ndarray | None = None,
     ) -> list[TTCWarning]:
-        track_by_id = {track.track_id: track for track in tracked_objects}
+        predicted_by_id = {trajectory.track_id: trajectory for trajectory in predicted_trajectories}
         warnings = []
-        prediction_ttc_enabled = abs(self.config.ego_speed_mps) > self.config.low_speed_suppress_mps
-        if prediction_ttc_enabled:
-            for trajectory in predicted_trajectories:
-                track = track_by_id.get(trajectory.track_id)
-                if track is None:
-                    continue
-
-                ttc_result = self.compute_ttc(track, trajectory.points)
-                warning_info = self.classify_warning(ttc_result.min_ttc_sec)
-                accel = self.s_curve_deceleration(ttc_result.min_ttc_sec)
-                warnings.append(
-                    TTCWarning(
-                        frame_id=frame_id,
-                        timestamp_sec=timestamp_sec,
-                        track_id=trajectory.track_id,
-                        level=warning_info["level"],
-                        label=warning_info["label"],
-                        action=warning_info["action"],
-                        color=warning_info["color"],
-                        min_ttc_sec=ttc_result.min_ttc_sec,
-                        target_accel_mps2=accel,
-                        distance_m=ttc_result.distance_m,
-                        collision_time_sec=ttc_result.collision_time_sec,
-                    )
+        for track in tracked_objects:
+            trajectory = predicted_by_id.get(track.track_id)
+            trajectory_points = self._trajectory_points_for_ttc(track, trajectory)
+            ttc_result = self.compute_ttc(track, trajectory_points)
+            warning_info = self.classify_warning(ttc_result.min_ttc_sec)
+            normal_warning_info = self.classify_warning_normal(ttc_result.min_ttc_sec)
+            accel = self.s_curve_deceleration(ttc_result.min_ttc_sec)
+            warnings.append(
+                TTCWarning(
+                    frame_id=frame_id,
+                    timestamp_sec=timestamp_sec,
+                    track_id=track.track_id,
+                    level=warning_info["level"],
+                    label=warning_info["label"],
+                    action=warning_info["action"],
+                    color=warning_info["color"],
+                    normal_level=normal_warning_info["level"],
+                    normal_label=normal_warning_info["label"],
+                    normal_action=normal_warning_info["action"],
+                    normal_color=normal_warning_info["color"],
+                    min_ttc_sec=ttc_result.min_ttc_sec,
+                    target_accel_mps2=accel,
+                    distance_m=ttc_result.distance_m,
+                    collision_time_sec=ttc_result.collision_time_sec,
                 )
+            )
 
         self.latest_static_obstacle = None
         if points is not None:
@@ -131,6 +141,98 @@ class TTCWarningAdapter:
 
         warnings.sort(key=lambda item: item.min_ttc_sec)
         return warnings
+
+    def _trajectory_points_for_ttc(
+        self,
+        track: TrackedPedestrian,
+        trajectory: PredictedTrajectory | None,
+    ) -> list[TrajectoryPoint]:
+        config = self.config
+        horizon_sec = max(config.ttc_horizon_sec, config.level1_ttc_sec, config.prediction_dt_sec)
+        step_sec = max(config.prediction_dt_sec, 0.05)
+        if trajectory is None or not trajectory.points:
+            return self._extrapolated_points(
+                start_t_sec=0.0,
+                start_x=track.x,
+                start_y=track.y,
+                velocity_x=track.vx,
+                velocity_y=track.vy,
+                step_sec=step_sec,
+                horizon_sec=horizon_sec,
+            )
+
+        points = sorted(
+            (point for point in trajectory.points if point.t_sec is None or point.t_sec > 0.0),
+            key=lambda point: point.t_sec if point.t_sec is not None else 0.0,
+        )
+        if not points:
+            return self._stationary_points(track)
+
+        last = points[-1]
+        last_t_sec = last.t_sec if last.t_sec is not None else len(points) * step_sec
+        if last_t_sec >= horizon_sec:
+            return points
+
+        velocity_x = track.vx
+        velocity_y = track.vy
+        if len(points) >= 2:
+            prev = points[-2]
+            prev_t_sec = prev.t_sec if prev.t_sec is not None else max(0.0, last_t_sec - step_sec)
+            dt = last_t_sec - prev_t_sec
+            if dt > 1e-6:
+                velocity_x = (last.x - prev.x) / dt
+                velocity_y = (last.y - prev.y) / dt
+
+        points.extend(
+            self._extrapolated_points(
+                start_t_sec=last_t_sec,
+                start_x=last.x,
+                start_y=last.y,
+                velocity_x=velocity_x,
+                velocity_y=velocity_y,
+                step_sec=step_sec,
+                horizon_sec=horizon_sec,
+            )
+        )
+        return points
+
+    def _stationary_points(self, track: TrackedPedestrian) -> list[TrajectoryPoint]:
+        config = self.config
+        horizon_sec = max(config.ttc_horizon_sec, config.level1_ttc_sec, config.prediction_dt_sec)
+        step_sec = max(config.prediction_dt_sec, 0.05)
+        return self._extrapolated_points(
+            start_t_sec=0.0,
+            start_x=track.x,
+            start_y=track.y,
+            velocity_x=0.0,
+            velocity_y=0.0,
+            step_sec=step_sec,
+            horizon_sec=horizon_sec,
+        )
+
+    @staticmethod
+    def _extrapolated_points(
+        start_t_sec: float,
+        start_x: float,
+        start_y: float,
+        velocity_x: float,
+        velocity_y: float,
+        step_sec: float,
+        horizon_sec: float,
+    ) -> list[TrajectoryPoint]:
+        points: list[TrajectoryPoint] = []
+        next_t_sec = min(start_t_sec + step_sec, horizon_sec)
+        while next_t_sec <= horizon_sec + 1e-6 and next_t_sec > start_t_sec + 1e-6:
+            elapsed_sec = next_t_sec - start_t_sec
+            points.append(
+                TrajectoryPoint(
+                    t_sec=next_t_sec,
+                    x=start_x + velocity_x * elapsed_sec,
+                    y=start_y + velocity_y * elapsed_sec,
+                )
+            )
+            next_t_sec += step_sec
+        return points
 
     def detect_static_obstacle(
         self,
@@ -148,10 +250,11 @@ class TTCWarningAdapter:
             return None
 
         speed_mps = abs(config.ego_speed_mps)
-        suppressed_low_speed = speed_mps <= config.perception_low_speed_suppress_mps
-        distance_m = float(np.percentile(cluster_points[:, 0], 5.0))
+        suppressed_low_speed = False
+        obstacle_front_x = float(np.percentile(cluster_points[:, 0], 5.0))
+        distance_m = max(0.0, obstacle_front_x - config.vehicle_front_m)
         ttc_sec = distance_m / speed_mps if speed_mps > 1e-6 else float("inf")
-        warning_info = self.classify_warning(ttc_sec) if not suppressed_low_speed else self.classify_warning(float("inf"))
+        warning_info = self.classify_warning(ttc_sec)
         centroid = np.mean(cluster_points[:, :3], axis=0)
 
         return StaticObstacleObservation(
@@ -178,10 +281,14 @@ class TTCWarningAdapter:
         self,
         observation: StaticObstacleObservation | None,
     ) -> TTCWarning | None:
-        if observation is None or observation.suppressed_low_speed or observation.level == 0:
+        if observation is None:
             return None
 
         warning_info = self.classify_warning(observation.ttc_sec)
+        normal_warning_info = self.classify_warning_normal(observation.ttc_sec)
+        if warning_info["level"] == 0 and normal_warning_info["level"] == 0:
+            return None
+
         accel = self.s_curve_deceleration(observation.ttc_sec)
         return TTCWarning(
             frame_id=observation.frame_id,
@@ -191,6 +298,10 @@ class TTCWarningAdapter:
             label="Static_Obstacle",
             action=warning_info["action"],
             color=warning_info["color"],
+            normal_level=normal_warning_info["level"],
+            normal_label=normal_warning_info["label"],
+            normal_action=normal_warning_info["action"],
+            normal_color=normal_warning_info["color"],
             min_ttc_sec=observation.ttc_sec,
             target_accel_mps2=accel,
             distance_m=observation.distance_m,
@@ -266,17 +377,18 @@ class TTCWarningAdapter:
         points: list[TrajectoryPoint],
     ) -> "_TTCComputation":
         config = self.config
-        front_m = config.vehicle_front_m + config.safety_radius_m
-        rear_m = config.vehicle_rear_m + config.safety_radius_m
-        side_m = config.vehicle_side_m + config.safety_radius_m
-        prev_distance = self._distance_to_footprint(
+        pedestrian_radius_m = self._pedestrian_collision_radius(current_track)
+        front_m = config.vehicle_front_m + pedestrian_radius_m
+        rear_m = config.vehicle_rear_m + pedestrian_radius_m
+        side_m = config.vehicle_side_m + pedestrian_radius_m
+        current_physical_distance = self._signed_distance_to_footprint(
             current_track.x,
             current_track.y,
-            front_m,
-            rear_m,
-            side_m,
+            config.vehicle_front_m,
+            config.vehicle_rear_m,
+            config.vehicle_side_m,
         )
-        if prev_distance <= 0.0:
+        if current_physical_distance <= 0.0:
             return _TTCComputation(
                 min_ttc_sec=0.0,
                 distance_m=0.0,
@@ -284,33 +396,49 @@ class TTCWarningAdapter:
             )
 
         best_ttc = float("inf")
-        best_distance = prev_distance
+        prev_t_sec = 0.0
+        prev_distance = self._signed_distance_to_future_ego_footprint(
+            point_x=current_track.x,
+            point_y=current_track.y,
+            t_sec=prev_t_sec,
+            front_m=front_m,
+            rear_m=rear_m,
+            side_m=side_m,
+        )
+        best_distance = max(prev_distance, 0.0)
         best_collision_time = float("inf")
 
         for index, point in enumerate(points):
             t_sec = point.t_sec if point.t_sec is not None else (index + 1) * config.prediction_dt_sec
-            distance = self._distance_to_footprint(
-                point.x - config.ego_speed_mps * t_sec,
-                point.y,
-                front_m,
-                rear_m,
-                side_m,
+            if t_sec <= prev_t_sec:
+                continue
+
+            distance = self._signed_distance_to_future_ego_footprint(
+                point_x=point.x,
+                point_y=point.y,
+                t_sec=t_sec,
+                front_m=front_m,
+                rear_m=rear_m,
+                side_m=side_m,
             )
 
-            prev_t_sec = 0.0 if index == 0 else points[index - 1].t_sec
             dt = max(t_sec - prev_t_sec, 1e-6)
-            approach_speed = (prev_distance - distance) / dt
-            speed_ttc = distance / approach_speed if approach_speed > 0.0 and distance > 0.0 else float("inf")
+            if distance <= 0.0:
+                if prev_distance > 0.0:
+                    crossing = prev_distance / max(prev_distance - distance, 1e-6)
+                    point_ttc = prev_t_sec + min(max(crossing, 0.0), 1.0) * dt
+                else:
+                    point_ttc = t_sec
+                best_ttc = min(best_ttc, point_ttc)
+                best_distance = 0.0
+                best_collision_time = point_ttc
+                break
 
-            direct_ttc = t_sec if distance <= 0.0 else float("inf")
-
-            point_ttc = min(speed_ttc, direct_ttc)
-            if point_ttc < best_ttc:
-                best_ttc = point_ttc
-                best_distance = distance
-                best_collision_time = t_sec
-
+            clearance = max(distance, 0.0)
+            if clearance < best_distance:
+                best_distance = clearance
             prev_distance = distance
+            prev_t_sec = t_sec
 
         return _TTCComputation(
             min_ttc_sec=best_ttc,
@@ -318,11 +446,79 @@ class TTCWarningAdapter:
             collision_time_sec=best_collision_time,
         )
 
+    def _signed_distance_to_future_ego_footprint(
+        self,
+        point_x: float,
+        point_y: float,
+        t_sec: float,
+        front_m: float,
+        rear_m: float,
+        side_m: float,
+    ) -> float:
+        ego_x, ego_y, ego_yaw = self._ego_pose_at(t_sec)
+        return self._signed_distance_to_oriented_footprint(
+            point_x=point_x,
+            point_y=point_y,
+            ego_x=ego_x,
+            ego_y=ego_y,
+            ego_yaw=ego_yaw,
+            front_m=front_m,
+            rear_m=rear_m,
+            side_m=side_m,
+        )
+
+    def _ego_pose_at(self, t_sec: float) -> tuple[float, float, float]:
+        config = self.config
+        speed_mps = config.ego_speed_mps
+        road_angle_rad = math.radians(config.ego_steering_deg) / max(config.ego_steer_ratio, 1e-6)
+        yaw_rate = speed_mps / max(config.ego_wheelbase_m, 1e-6) * math.tan(road_angle_rad)
+        if abs(yaw_rate) < 1e-6:
+            return speed_mps * t_sec, 0.0, 0.0
+
+        yaw = yaw_rate * t_sec
+        radius = speed_mps / yaw_rate
+        return radius * math.sin(yaw), radius * (1.0 - math.cos(yaw)), yaw
+
+    @staticmethod
+    def _signed_distance_to_oriented_footprint(
+        point_x: float,
+        point_y: float,
+        ego_x: float,
+        ego_y: float,
+        ego_yaw: float,
+        front_m: float,
+        rear_m: float,
+        side_m: float,
+    ) -> float:
+        dx = point_x - ego_x
+        dy = point_y - ego_y
+        cos_yaw = math.cos(ego_yaw)
+        sin_yaw = math.sin(ego_yaw)
+        local_x = cos_yaw * dx + sin_yaw * dy
+        local_y = -sin_yaw * dx + cos_yaw * dy
+        return TTCWarningAdapter._signed_distance_to_footprint(local_x, local_y, front_m, rear_m, side_m)
+
+    @staticmethod
+    def _pedestrian_collision_radius(track: TrackedPedestrian) -> float:
+        extents = [value for value in (track.dx, track.dy) if value is not None and value > 0.0]
+        if not extents:
+            return 0.35
+        return max(0.25, min(0.60, max(extents) * 0.5))
+
     @staticmethod
     def _distance_to_footprint(local_x: float, local_y: float, front_m: float, rear_m: float, side_m: float) -> float:
-        dx = max(local_x - front_m, -local_x - rear_m, 0.0)
-        dy = max(abs(local_y) - side_m, 0.0)
-        return math.hypot(dx, dy)
+        return max(0.0, TTCWarningAdapter._signed_distance_to_footprint(local_x, local_y, front_m, rear_m, side_m))
+
+    @staticmethod
+    def _signed_distance_to_footprint(local_x: float, local_y: float, front_m: float, rear_m: float, side_m: float) -> float:
+        dx = max(local_x - front_m, -local_x - rear_m)
+        dy = abs(local_y) - side_m
+        outside_x = max(dx, 0.0)
+        outside_y = max(dy, 0.0)
+        outside_distance = math.hypot(outside_x, outside_y)
+        if dx <= 0.0 and dy <= 0.0:
+            return max(dx, dy)
+        return outside_distance
 
     def s_curve_deceleration(self, ttc_sec: float) -> float:
         config = self.config
@@ -338,7 +534,18 @@ class TTCWarningAdapter:
         return round(accel_cmd, 3)
 
     def classify_warning(self, ttc_sec: float) -> dict:
-        level1_ttc_sec, level2_ttc_sec, level3_ttc_sec = self._active_thresholds()
+        return self._classify_warning_with_thresholds(ttc_sec, self._active_thresholds())
+
+    def classify_warning_normal(self, ttc_sec: float) -> dict:
+        config = self.config
+        return self._classify_warning_with_thresholds(
+            ttc_sec,
+            (config.level1_ttc_sec, config.level2_ttc_sec, config.level3_ttc_sec),
+        )
+
+    @staticmethod
+    def _classify_warning_with_thresholds(ttc_sec: float, thresholds: tuple[float, float, float]) -> dict:
+        level1_ttc_sec, level2_ttc_sec, level3_ttc_sec = thresholds
         if ttc_sec <= level3_ttc_sec:
             return {
                 "level": 3,
@@ -369,8 +576,15 @@ class TTCWarningAdapter:
 
     def _active_thresholds(self) -> tuple[float, float, float]:
         config = self.config
-        scale = config.brake_ttc_scale if config.driver_brake_pressed and not config.driver_accelerator_pressed else 1.0
-        scale = max(0.05, min(1.0, scale))
+        brake_scale = config.brake_ttc_scale if config.driver_brake_pressed and not config.driver_accelerator_pressed else 1.0
+        speed_mps = abs(config.ego_speed_mps)
+        low_speed_ref = max(config.low_speed_suppress_mps, 1e-6)
+        if speed_mps <= low_speed_ref:
+            speed_scale = 0.45 + 0.55 * (speed_mps / low_speed_ref)
+        else:
+            high_speed_ref = max(50.0 / 3.6, low_speed_ref + 1e-6)
+            speed_scale = 1.0 + 0.25 * min((speed_mps - low_speed_ref) / (high_speed_ref - low_speed_ref), 1.0)
+        scale = max(0.25, min(1.25, brake_scale * speed_scale))
         return (
             config.level1_ttc_sec * scale,
             config.level2_ttc_sec * scale,

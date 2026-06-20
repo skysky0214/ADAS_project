@@ -40,7 +40,7 @@ def build_tracking_marker_array(
     marker_array.markers.append(delete_marker)
 
     prediction_by_track = {trajectory.track_id: trajectory for trajectory in trajectories}
-    warning_by_track = {warning.track_id: warning for warning in warnings if warning.level > 0}
+    warning_by_track = {warning.track_id: warning for warning in warnings if warning.track_id >= 0}
 
     _append_ego_markers(
         marker_array=marker_array,
@@ -127,20 +127,33 @@ def build_tracking_marker_array(
             warning_marker.pose.position.z = float(track.z + (track.dz or 1.7) + 1.0)
             warning_marker.scale.z = 0.65
             warning_marker.text = (
-                f"L{warning.level} TTC {warning.min_ttc_sec:.2f}s "
+                f"L{warning.level} TTC {_format_ttc(warning.min_ttc_sec)} "
                 f"a={warning.target_accel_mps2:.1f}"
             )
-            color = {
-                1: (1.0, 1.0, 0.0, 1.0),
-                2: (1.0, 0.55, 0.0, 1.0),
-                3: (1.0, 0.0, 0.0, 1.0),
-            }.get(warning.level, (1.0, 1.0, 1.0, 1.0))
-            _set_marker_color(warning_marker, color)
+            _set_marker_color(warning_marker, _warning_level_rgba(warning.level))
             marker_array.markers.append(warning_marker)
+
+            normal_marker = _base_marker(
+                frame_id,
+                timestamp,
+                "ttc_normal_warnings",
+                60_000 + track.track_id,
+                Marker.TEXT_VIEW_FACING,
+            )
+            normal_marker.pose.position.x = float(track.x)
+            normal_marker.pose.position.y = float(track.y)
+            normal_marker.pose.position.z = float(track.z + (track.dz or 1.7) + 1.65)
+            normal_marker.scale.z = 0.52
+            normal_marker.text = f"BASE L{warning.normal_level}"
+            _set_marker_color(normal_marker, _warning_level_rgba(warning.normal_level))
+            marker_array.markers.append(normal_marker)
 
     # Render static obstacle warnings
     for warning in warnings:
-        if warning.track_id == -99 and warning.level > 0:
+        if warning.track_id == -99 and (warning.level > 0 or warning.normal_level > 0):
+            marker_x = float(static_obstacle.centroid_x) if static_obstacle is not None else float(warning.distance_m + vehicle_front_m)
+            marker_y = float(static_obstacle.centroid_y) if static_obstacle is not None else 0.0
+            marker_z = float(static_obstacle.z_max + 0.8) if static_obstacle is not None else 0.8
             # TEXT marker for warning message
             text_marker = _base_marker(
                 frame_id,
@@ -149,20 +162,16 @@ def build_tracking_marker_array(
                 50_000,
                 Marker.TEXT_VIEW_FACING,
             )
-            text_marker.pose.position.x = float(warning.distance_m)
-            text_marker.pose.position.y = 0.0
-            text_marker.pose.position.z = 0.8
+            text_marker.pose.position.x = marker_x
+            text_marker.pose.position.y = marker_y
+            text_marker.pose.position.z = marker_z
             text_marker.scale.z = 0.7
             text_marker.text = (
-                f"[STATIC] L{warning.level} TTC {warning.min_ttc_sec:.2f}s "
-                f"dist={warning.distance_m:.1f}m"
+                f"[STATIC] L{warning.level} BASE L{warning.normal_level} "
+                f"TTC {_format_ttc(warning.min_ttc_sec)} "
+                f"front_dist={warning.distance_m:.1f}m"
             )
-            color = {
-                1: (1.0, 1.0, 0.0, 1.0),
-                2: (1.0, 0.55, 0.0, 1.0),
-                3: (1.0, 0.0, 0.0, 1.0),
-            }.get(warning.level, (1.0, 1.0, 1.0, 1.0))
-            _set_marker_color(text_marker, color)
+            _set_marker_color(text_marker, _warning_level_rgba(max(warning.level, warning.normal_level)))
             marker_array.markers.append(text_marker)
 
             # CUBE marker to highlight the static obstacle warning zone
@@ -173,23 +182,44 @@ def build_tracking_marker_array(
                 50_001,
                 Marker.CUBE,
             )
-            box_marker.pose.position.x = float(warning.distance_m)
-            box_marker.pose.position.y = 0.0
-            box_marker.pose.position.z = 0.0
-            box_marker.scale.x = 1.0
-            box_marker.scale.y = 2.0
-            box_marker.scale.z = 1.0
+            if static_obstacle is not None:
+                box_marker.pose.position.x = float((static_obstacle.x_min + static_obstacle.x_max) * 0.5)
+                box_marker.pose.position.y = float((static_obstacle.y_min + static_obstacle.y_max) * 0.5)
+                box_marker.pose.position.z = float((static_obstacle.z_min + static_obstacle.z_max) * 0.5)
+                box_marker.scale.x = max(float(static_obstacle.x_max - static_obstacle.x_min), 0.30)
+                box_marker.scale.y = max(float(static_obstacle.y_max - static_obstacle.y_min), 0.30)
+                box_marker.scale.z = max(float(static_obstacle.z_max - static_obstacle.z_min), 0.30)
+            else:
+                box_marker.pose.position.x = marker_x
+                box_marker.pose.position.y = marker_y
+                box_marker.pose.position.z = 0.0
+                box_marker.scale.x = 1.0
+                box_marker.scale.y = 2.0
+                box_marker.scale.z = 1.0
 
             # Semi-transparent coloring based on danger level
-            rgba = {
-                1: (1.0, 1.0, 0.0, 0.35),
-                2: (1.0, 0.55, 0.0, 0.45),
-                3: (1.0, 0.0, 0.0, 0.55),
-            }.get(warning.level, (1.0, 1.0, 1.0, 0.2))
+            base_rgba = _warning_level_rgba(max(warning.level, warning.normal_level))
+            alpha = {1: 0.35, 2: 0.45, 3: 0.55}.get(max(warning.level, warning.normal_level), 0.2)
+            rgba = (base_rgba[0], base_rgba[1], base_rgba[2], alpha)
             _set_marker_color(box_marker, rgba)
             marker_array.markers.append(box_marker)
 
     return marker_array
+
+
+def _format_ttc(ttc_sec: float) -> str:
+    if not math.isfinite(ttc_sec):
+        return "inf"
+    return f"{ttc_sec:.2f}s"
+
+
+def _warning_level_rgba(level: int) -> tuple[float, float, float, float]:
+    return {
+        0: (0.0, 1.0, 0.35, 1.0),
+        1: (1.0, 1.0, 0.0, 1.0),
+        2: (1.0, 0.55, 0.0, 1.0),
+        3: (1.0, 0.0, 0.0, 1.0),
+    }.get(level, (1.0, 1.0, 1.0, 1.0))
 
 
 def _append_static_obstacle_markers(
@@ -234,7 +264,7 @@ def _append_static_obstacle_markers(
     label.scale.z = 0.55
     label.text = (
         f"STATIC CLOUD pts={static_obstacle.point_count} "
-        f"dist={static_obstacle.distance_m:.1f}m {ttc_text} L{static_obstacle.level}"
+        f"front_dist={static_obstacle.distance_m:.1f}m {ttc_text} L{static_obstacle.level}"
     )
     _set_marker_color(label, (rgba[0], rgba[1], rgba[2], 1.0))
     marker_array.markers.append(label)

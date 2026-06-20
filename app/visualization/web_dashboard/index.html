@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="index.css">
+    <link rel="stylesheet" href="index.css?v=roi-lidar-20260616-2">
 </head>
 <body>
     <!-- Screen Emergency Glow Overlay -->
@@ -89,6 +89,28 @@
                             <span class="label">Safety Radius:</span>
                             <span class="value" id="param-safety-radius">1.0 m</span>
                         </div>
+                        <div class="roi-control-panel">
+                            <h3>STATIC ROI CONTROL</h3>
+                            <div class="roi-section-title">Static Obstacle</div>
+                            <div class="roi-grid">
+                                <label>X Min<input type="number" step="0.1" id="roi-static-x-min"></label>
+                                <label>X Max<input type="number" step="0.1" id="roi-static-x-max"></label>
+                                <label>Y Min<input type="number" step="0.1" id="roi-static-y-min"></label>
+                                <label>Y Max<input type="number" step="0.1" id="roi-static-y-max"></label>
+                                <label>Z Min<input type="number" step="0.1" id="roi-static-z-min"></label>
+                                <label>Z Max<input type="number" step="0.1" id="roi-static-z-max"></label>
+                            </div>
+                            <div class="roi-actions">
+                                <button id="btn-apply-roi" class="btn btn-primary">APPLY STATIC ROI</button>
+                                <span id="roi-status" class="roi-status">Ready</span>
+                            </div>
+                            <div class="roi-applied">
+                                <div class="roi-applied-row">
+                                    <span>Applied Static</span>
+                                    <strong id="roi-applied-static">--</strong>
+                                </div>
+                            </div>
+                        </div>
                         <div class="audio-toggle-container">
                             <button id="btn-audio-toggle" class="btn btn-secondary btn-audio-off">🔊 AUDIO: ON</button>
                         </div>
@@ -96,14 +118,14 @@
                 </div>
             </section>
 
-            <!-- CENTER PANEL: BEV RADAR -->
+                    <!-- CENTER PANEL: BEV LIDAR -->
             <section class="panel radar-panel">
                 <div class="radar-container" id="radar-container">
                     <div class="radar-hud-overlay">
                         <div class="hud-angle-left"></div>
                         <div class="hud-angle-right"></div>
-                        <div class="radar-title">ADAS 실시간 보행자 감지</div>
-                        <div class="radar-scale">GRID: 5m / DIV</div>
+                        <div class="radar-title">LiDAR POINT CLOUD ROI</div>
+                        <div class="radar-scale" id="radar-scale">GRID: 5m / DIV</div>
                     </div>
                     <canvas id="radar-canvas"></canvas>
                 </div>
@@ -207,6 +229,6 @@
     </div>
 
     <!-- Main Logic script -->
-    <script src="app.js"></script>
+    <script src="app.js?v=roi-lidar-20260616-2"></script>
 </body>
 </html>

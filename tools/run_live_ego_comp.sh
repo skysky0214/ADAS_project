@@ -28,7 +28,7 @@ export LD_LIBRARY_PATH="$TORCH_LIB:${LD_LIBRARY_PATH:-}"
 python app/main.py \
   --topic /lidar_points \
   --perception pointpillar \
-  --score-threshold 0.15 \
+  --score-threshold 0.28 \
   --prediction srlstm \
   --prediction-fps 2.5 \
   --latency-playback-rate 1.0 \
