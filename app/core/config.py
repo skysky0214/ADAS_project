@@ -41,6 +41,8 @@ class PipelineConfig:
     pointpillar_checkpoint: Path = DEFAULT_POINTPILLAR_CHECKPOINT
     perception_score_threshold: float = 0.1
     perception_device: str = "cuda"
+    pedestrian_min_point_max_distance_m: float | None = None
+    pedestrian_max_point_max_distance_m: float | None = None
     prediction_name: str = "none"
     srlstm_checkpoint: Path = DEFAULT_SRLSTM_CHECKPOINT
     srlstm_sensor_fps: float = 2.5

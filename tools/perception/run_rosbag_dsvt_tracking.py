@@ -93,6 +93,8 @@ def _write_detection_csv(rows: list[dict], csv_path: Path) -> None:
         "dx",
         "dy",
         "dz",
+        "point_max_distance_m",
+        "point_count",
         "heading",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -110,6 +112,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=10)
     parser.add_argument("--score-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--pedestrian-min-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is smaller than this value in meters",
+    )
+    parser.add_argument(
+        "--pedestrian-max-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is larger than this value in meters",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/rosbag_dsvt_tracking"))
     return parser
@@ -121,6 +135,8 @@ def main() -> None:
         perception_name="openpcdet_dsvt",
         perception_score_threshold=args.score_threshold,
         perception_device=args.device,
+        pedestrian_min_point_max_distance_m=args.pedestrian_min_point_max_distance,
+        pedestrian_max_point_max_distance_m=args.pedestrian_max_point_max_distance,
     )
     pipeline = RealTimePedestrianTrackingPipeline(config)
 
@@ -141,7 +157,10 @@ def main() -> None:
             payload={"points": points},
         )
         detections = pipeline.detector.infer(frame)
-        pedestrian_detections = filter_pedestrians(detections)
+        pedestrian_detections = filter_pedestrians(
+            detections,
+            point_spread_filter=pipeline.pedestrian_point_spread_filter,
+        )
         tracks = pipeline.tracker.update(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,

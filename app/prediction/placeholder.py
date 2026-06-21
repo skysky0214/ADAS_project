@@ -16,7 +16,12 @@ class PlaceholderPredictionModel(PredictionModel):
         self.horizon_sec = horizon_sec
         self.step_sec = step_sec
 
-    def predict(self, tracked_objects: list[TrackedPedestrian]) -> list[PredictedTrajectory]:
+    def predict(
+        self,
+        tracked_objects: list[TrackedPedestrian],
+        timestamp_sec: float | None = None,
+        ego_motion_delta: tuple[float, float, float] | None = None,
+    ) -> list[PredictedTrajectory]:
         trajectories: list[PredictedTrajectory] = []
 
         for obj in tracked_objects:

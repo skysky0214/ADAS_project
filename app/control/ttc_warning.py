@@ -106,12 +106,19 @@ class TTCWarningAdapter:
         predicted_by_id = {trajectory.track_id: trajectory for trajectory in predicted_trajectories}
         warnings = []
         for track in tracked_objects:
+            if track.missed > 0:
+                continue
             trajectory = predicted_by_id.get(track.track_id)
             trajectory_points = self._trajectory_points_for_ttc(track, trajectory)
             ttc_result = self.compute_ttc(track, trajectory_points)
             warning_info = self.classify_warning(ttc_result.min_ttc_sec)
             normal_warning_info = self.classify_warning_normal(ttc_result.min_ttc_sec)
             accel = self.s_curve_deceleration(ttc_result.min_ttc_sec)
+            collision_time_sec = (
+                timestamp_sec + ttc_result.min_ttc_sec
+                if math.isfinite(ttc_result.min_ttc_sec)
+                else float("inf")
+            )
             warnings.append(
                 TTCWarning(
                     frame_id=frame_id,
@@ -128,7 +135,7 @@ class TTCWarningAdapter:
                     min_ttc_sec=ttc_result.min_ttc_sec,
                     target_accel_mps2=accel,
                     distance_m=ttc_result.distance_m,
-                    collision_time_sec=ttc_result.collision_time_sec,
+                    collision_time_sec=collision_time_sec,
                 )
             )
 
@@ -378,9 +385,10 @@ class TTCWarningAdapter:
     ) -> "_TTCComputation":
         config = self.config
         pedestrian_radius_m = self._pedestrian_collision_radius(current_track)
-        front_m = config.vehicle_front_m + pedestrian_radius_m
-        rear_m = config.vehicle_rear_m + pedestrian_radius_m
-        side_m = config.vehicle_side_m + pedestrian_radius_m
+        collision_margin_m = pedestrian_radius_m + max(config.safety_radius_m, 0.0)
+        front_m = config.vehicle_front_m + collision_margin_m
+        rear_m = config.vehicle_rear_m + collision_margin_m
+        side_m = config.vehicle_side_m + collision_margin_m
         current_physical_distance = self._signed_distance_to_footprint(
             current_track.x,
             current_track.y,
@@ -576,19 +584,10 @@ class TTCWarningAdapter:
 
     def _active_thresholds(self) -> tuple[float, float, float]:
         config = self.config
-        brake_scale = config.brake_ttc_scale if config.driver_brake_pressed and not config.driver_accelerator_pressed else 1.0
-        speed_mps = abs(config.ego_speed_mps)
-        low_speed_ref = max(config.low_speed_suppress_mps, 1e-6)
-        if speed_mps <= low_speed_ref:
-            speed_scale = 0.45 + 0.55 * (speed_mps / low_speed_ref)
-        else:
-            high_speed_ref = max(50.0 / 3.6, low_speed_ref + 1e-6)
-            speed_scale = 1.0 + 0.25 * min((speed_mps - low_speed_ref) / (high_speed_ref - low_speed_ref), 1.0)
-        scale = max(0.25, min(1.25, brake_scale * speed_scale))
         return (
-            config.level1_ttc_sec * scale,
-            config.level2_ttc_sec * scale,
-            config.level3_ttc_sec * scale,
+            config.level1_ttc_sec,
+            config.level2_ttc_sec,
+            config.level3_ttc_sec,
         )
 
 

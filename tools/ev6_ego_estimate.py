@@ -80,6 +80,12 @@ def parse_args():
   parser.add_argument("--front-overhang", type=float, default=0.870, help="Front overhang in meters")
   parser.add_argument("--rear-overhang", type=float, default=0.785, help="Rear overhang in meters")
   parser.add_argument("--steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
+  parser.add_argument(
+    "--steer-bias-deg",
+    type=float,
+    default=0.0,
+    help="Steering wheel angle bias in degrees to subtract after sign correction",
+  )
   parser.add_argument("--angle-source", choices=("sensor", "mdps"), default="sensor",
                       help="Use STEERING_SENSORS or MDPS angle")
   parser.add_argument("--invert-steer", action="store_true", help="Invert decoded steering sign")
@@ -111,7 +117,8 @@ def main():
   print(
     f"Geometry: L={args.length:.3f}m W={args.width:.3f}m H={args.height:.3f}m "
     f"WB={args.wheelbase:.3f}m FOH={args.front_overhang:.3f}m ROH={args.rear_overhang:.3f}m "
-    f"derived_L={derived_length:.3f}m steer_ratio={args.steer_ratio:.2f}"
+    f"derived_L={derived_length:.3f}m steer_ratio={args.steer_ratio:.2f} "
+    f"steer_bias={args.steer_bias_deg:.2f}deg"
   )
 
   csv_file = None
@@ -164,6 +171,7 @@ def main():
         steer_deg = -ss["STEERING_ANGLE"]
       if args.invert_steer:
         steer_deg *= -1.0
+      steer_deg -= args.steer_bias_deg
 
       road_angle_rad = math.radians(steer_deg) / max(args.steer_ratio, 1e-6)
       yaw_rate = v / args.wheelbase * math.tan(road_angle_rad)

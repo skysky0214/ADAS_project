@@ -203,6 +203,38 @@ class RealtimePredictor:
         ready_ids = [tid for tid, buf in self.obs_buffer.items()
                      if len(buf) >= self.obs_length]
 
+        return self._predict_ready_ids(
+            ready_ids=ready_ids,
+            num_tracked=len(self.obs_buffer),
+            ego_position=ego_position,
+            ego_heading=ego_heading,
+            vehicle_width=vehicle_width,
+            vehicle_length=vehicle_length,
+            safety_margin=safety_margin,
+        )
+
+    def predict_from_buffer(self, track_ids: Optional[List[int]] = None) -> dict:
+        """Run inference from obs_buffer without appending a new observation."""
+        self.frame_count += 1
+        candidate_ids = list(self.obs_buffer.keys()) if track_ids is None else [
+            tid for tid in track_ids if tid in self.obs_buffer
+        ]
+        ready_ids = [
+            tid for tid in candidate_ids
+            if len(self.obs_buffer[tid]) >= self.obs_length
+        ]
+        return self._predict_ready_ids(ready_ids=ready_ids, num_tracked=len(candidate_ids))
+
+    def _predict_ready_ids(
+        self,
+        ready_ids: List[int],
+        num_tracked: int,
+        ego_position: Tuple[float, float] = (0.0, 0.0),
+        ego_heading: float = 0.0,
+        vehicle_width: float = 1.8,
+        vehicle_length: float = 4.5,
+        safety_margin: float = 1.0,
+    ) -> dict:
         predictions = {}
         ttc_results = {}
         alerts = []
@@ -265,7 +297,7 @@ class RealtimePredictor:
             'ttc': ttc_results,
             'alerts': alerts,
             'inference_time_ms': inference_time,
-            'num_tracked': len(self.obs_buffer),
+            'num_tracked': num_tracked,
             'num_predicted': len(ready_ids),
         }
 

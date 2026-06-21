@@ -83,17 +83,38 @@ class DSVTTrackingNode(Node):
             perception_name=f"openpcdet_{args.perception}",
             perception_score_threshold=args.score_threshold,
             perception_device=args.device,
+            pedestrian_min_point_max_distance_m=args.pedestrian_min_point_max_distance,
+            pedestrian_max_point_max_distance_m=args.pedestrian_max_point_max_distance,
         )
         self.get_logger().info(f"Loading OpenPCDet {args.perception} model...")
         self.pipeline = RealTimePedestrianTrackingPipeline(config)
         self.get_logger().info("Model loaded. Waiting for PointCloud2 frames.")
         self.prediction_model = self._build_prediction_model(args, config)
         self.warning_adapter = self._build_warning_adapter(args)
-        self.ego_reader = self._build_ego_reader(args)
+        self._topic_ego_delta = EgoMotionDelta()
+        self._topic_ego_pending_dx_m = 0.0
+        self._topic_ego_pending_dy_m = 0.0
+        self._topic_ego_pending_dyaw_rad = 0.0
+        self._topic_ego_reset_pending = False
+        self._topic_ego_has_sample = False
         self.ego_topic_publisher = None
-        if args.ego_topic:
+        if args.ego_topic and args.ego_source != "topic":
             self.ego_topic_publisher = self.create_publisher(String, args.ego_topic, 100)
             self.get_logger().info(f"Publishing ego motion JSON on {args.ego_topic}")
+        self.ego_topic_subscription = None
+        if args.ego_compensation and args.ego_source == "topic":
+            self.ego_topic_subscription = self.create_subscription(
+                String,
+                args.ego_input_topic,
+                self._on_ego_motion_topic,
+                100,
+            )
+            self.get_logger().info(f"Using ego motion from ROS topic {args.ego_input_topic}")
+        self.ego_raw_can_publisher = None
+        if args.ego_raw_topic and args.ego_source == "panda":
+            self.ego_raw_can_publisher = self.create_publisher(String, args.ego_raw_topic, 1000)
+            self.get_logger().info(f"Publishing raw ego CAN JSON on {args.ego_raw_topic}")
+        self.ego_reader = self._build_ego_reader(args)
         self.marker_publisher = None
         if not args.no_rviz:
             self.marker_publisher = self.create_publisher(MarkerArray, args.marker_topic, 10)
@@ -149,7 +170,10 @@ class DSVTTrackingNode(Node):
         detections = raw_detections
         detection_roi_ms = 0.0
         stage_start = time.perf_counter()
-        pedestrian_detections = filter_pedestrians(detections)
+        pedestrian_detections = filter_pedestrians(
+            detections,
+            point_spread_filter=self.pipeline.pedestrian_point_spread_filter,
+        )
         filter_ms = _elapsed_ms(stage_start)
 
         stage_start = time.perf_counter()
@@ -162,6 +186,7 @@ class DSVTTrackingNode(Node):
             warning_config_updates.update(
                 {
                     "ego_speed_mps": ego_delta.speed_mps,
+                    "ego_steering_deg": ego_delta.steering_deg,
                     "driver_brake_pressed": ego_delta.brake_pressed,
                     "driver_accelerator_pressed": ego_delta.accelerator_pressed,
                 }
@@ -174,7 +199,7 @@ class DSVTTrackingNode(Node):
                 dx_m=ego_delta.dx_m,
                 dy_m=ego_delta.dy_m,
                 dyaw_rad=ego_delta.dyaw_rad,
-                reset=ego_delta.reset and self.args.ego_reset_tracks_on_stop,
+                reset=ego_delta.reset,
             )
         ego_apply_ms = _elapsed_ms(stage_start)
 
@@ -201,7 +226,16 @@ class DSVTTrackingNode(Node):
         prediction_ms = 0.0
         if self.prediction_model is not None:
             stage_start = time.perf_counter()
-            trajectories = self.prediction_model.predict(result.tracks)
+            prediction_ego_delta = (
+                (ego_delta.dx_m, ego_delta.dy_m, ego_delta.dyaw_rad)
+                if ego_delta.valid
+                else None
+            )
+            trajectories = self.prediction_model.predict(
+                result.tracks,
+                timestamp_sec=frame.timestamp_sec,
+                ego_motion_delta=prediction_ego_delta,
+            )
             prediction_infer_ms = _elapsed_ms(stage_start)
             stage_start = time.perf_counter()
             self.predicted_trajectories.extend(
@@ -458,11 +492,12 @@ class DSVTTrackingNode(Node):
         )
 
     def _build_ego_reader(self, args: argparse.Namespace) -> PandaEgoMotionReader | None:
-        if not args.ego_compensation:
+        if not args.ego_compensation or args.ego_source != "panda":
             return None
         self.get_logger().info(
             f"Starting Panda ego motion reader on bus {args.ego_can_bus} "
-            f"(wheelbase={args.ego_wheelbase:.3f}m steer_ratio={args.ego_steer_ratio:.2f})"
+            f"(wheelbase={args.ego_wheelbase:.3f}m steer_ratio={args.ego_steer_ratio:.2f} "
+            f"steer_bias={args.ego_steer_bias_deg:.2f}deg)"
         )
         reader = PandaEgoMotionReader(
             bus=args.ego_can_bus,
@@ -471,11 +506,11 @@ class DSVTTrackingNode(Node):
             configure_panda=not args.ego_no_config,
             wheelbase_m=args.ego_wheelbase,
             steer_ratio=args.ego_steer_ratio,
+            steer_bias_deg=args.ego_steer_bias_deg,
             angle_source=args.ego_angle_source,
             invert_steer=args.ego_invert_steer,
             max_dt_sec=args.ego_max_dt,
-            stop_speed_threshold_mps=args.ego_stop_speed_threshold,
-            stop_reset_sec=args.ego_stop_reset_sec,
+            raw_can_callback=self._publish_raw_ego_can if args.ego_raw_topic else None,
         )
         if reader.wait_ready(timeout_sec=2.0):
             if reader.error:
@@ -488,11 +523,66 @@ class DSVTTrackingNode(Node):
         return reader
 
     def _pop_ego_motion_delta(self) -> EgoMotionDelta:
+        if self.args.ego_compensation and self.args.ego_source == "topic":
+            delta = self._topic_ego_delta
+            if self._topic_ego_has_sample:
+                delta = EgoMotionDelta(
+                    dx_m=self._topic_ego_pending_dx_m,
+                    dy_m=self._topic_ego_pending_dy_m,
+                    dyaw_rad=self._topic_ego_pending_dyaw_rad,
+                    speed_mps=delta.speed_mps,
+                    steering_deg=delta.steering_deg,
+                    accelerator_pressed=delta.accelerator_pressed,
+                    accelerator_pedal=delta.accelerator_pedal,
+                    accelerator_pedal_raw=delta.accelerator_pedal_raw,
+                    brake_pressed=delta.brake_pressed,
+                    brake_lights=delta.brake_lights,
+                    valid=delta.valid,
+                    reset=self._topic_ego_reset_pending,
+                )
+            self._topic_ego_pending_dx_m = 0.0
+            self._topic_ego_pending_dy_m = 0.0
+            self._topic_ego_pending_dyaw_rad = 0.0
+            self._topic_ego_reset_pending = False
+            return delta
         if self.ego_reader is None:
             if self.args.ego_compensation:
                 return EgoMotionDelta(speed_mps=0.0)
             return EgoMotionDelta(speed_mps=self.args.ego_speed)
         return self.ego_reader.pop_delta()
+
+    def _on_ego_motion_topic(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+
+        reset = bool(data.get("reset", False))
+        if reset:
+            self._topic_ego_pending_dx_m = 0.0
+            self._topic_ego_pending_dy_m = 0.0
+            self._topic_ego_pending_dyaw_rad = 0.0
+            self._topic_ego_reset_pending = True
+        else:
+            self._topic_ego_pending_dx_m += float(data.get("dx_m", 0.0) or 0.0)
+            self._topic_ego_pending_dy_m += float(data.get("dy_m", 0.0) or 0.0)
+            self._topic_ego_pending_dyaw_rad += float(data.get("dyaw_rad", 0.0) or 0.0)
+
+        self._topic_ego_delta = EgoMotionDelta(
+            dx_m=0.0,
+            dy_m=0.0,
+            dyaw_rad=0.0,
+            speed_mps=float(data.get("speed_mps", 0.0) or 0.0),
+            steering_deg=float(data.get("steering_deg", 0.0) or 0.0),
+            accelerator_pressed=bool(data.get("accelerator_pressed", False)),
+            accelerator_pedal=float(data.get("accelerator_pedal", 0.0) or 0.0),
+            accelerator_pedal_raw=int(data.get("accelerator_pedal_raw", 0) or 0),
+            brake_pressed=bool(data.get("brake_pressed", False)),
+            brake_lights=bool(data.get("brake_lights", data.get("brake_pressed", False))),
+            valid=bool(data.get("valid", True)),
+            reset=reset,
+        )
+        self._topic_ego_has_sample = True
 
     def _publish_ego_motion_topic(
         self,
@@ -508,6 +598,13 @@ class DSVTTrackingNode(Node):
             **asdict(ego_delta),
         }
         self.ego_topic_publisher.publish(String(data=json.dumps(_json_safe(payload), separators=(",", ":"))))
+
+    def _publish_raw_ego_can(self, payload: dict) -> None:
+        if self.ego_raw_can_publisher is None:
+            return
+        self.ego_raw_can_publisher.publish(
+            String(data=json.dumps(_json_safe(payload), separators=(",", ":")))
+        )
 
     def _playback_lag_ms(self, timestamp_sec: float, receive_wall_sec: float) -> float:
         if self.first_msg_timestamp_sec is None or self.first_receive_wall_sec is None:
@@ -576,6 +673,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topic", default="/lidar_points")
     parser.add_argument("--perception", choices=["dsvt", "pointpillar"], default="pointpillar")
     parser.add_argument("--score-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--pedestrian-min-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is smaller than this value in meters",
+    )
+    parser.add_argument(
+        "--pedestrian-max-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is larger than this value in meters",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--queue-size", type=int, default=1)
     parser.add_argument("--max-frames", type=int, default=None)
@@ -607,26 +716,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Exclude the first N frames from latency average and percent summary rows",
     )
-    parser.add_argument("--ego-speed", type=float, default=10.0)
+    parser.add_argument("--ego-speed", type=float, default=6.0)
     parser.add_argument("--ego-compensation", action="store_true", help="Use Panda wheel speed/steering for ego motion compensation")
+    parser.add_argument(
+        "--ego-source",
+        choices=("panda", "topic"),
+        default="panda",
+        help="Use live Panda CAN or an existing ROS ego motion topic for ego compensation",
+    )
+    parser.add_argument("--ego-input-topic", default="/vehicle/ego_motion", help="Input ego motion JSON topic when --ego-source=topic")
     parser.add_argument("--ego-topic", default="/vehicle/ego_motion", help="Publish ego motion JSON to this ROS topic; empty disables it")
+    parser.add_argument("--ego-raw-topic", default="/vehicle/can/raw", help="Publish raw ego CAN JSON to this ROS topic; empty disables it")
     parser.add_argument("--ego-can-bus", type=int, default=0, help="Panda bus with WHEEL_SPEEDS/STEERING_SENSORS")
     parser.add_argument("--ego-can-speed", type=int, default=500, help="Ego CAN nominal speed in kbps")
     parser.add_argument("--ego-data-speed", type=int, default=2000, help="Ego CAN-FD data speed in kbps")
     parser.add_argument("--ego-no-config", action="store_true", help="Do not configure Panda CAN-FD speeds for ego reader")
     parser.add_argument("--ego-wheelbase", type=float, default=2.900)
     parser.add_argument("--ego-steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
+    parser.add_argument(
+        "--ego-steer-bias-deg",
+        type=float,
+        default=0.0,
+        help="Steering wheel angle bias in degrees to subtract after sign correction",
+    )
     parser.add_argument("--ego-angle-source", choices=("sensor", "mdps"), default="sensor")
     parser.add_argument("--ego-invert-steer", action="store_true")
     parser.add_argument("--ego-max-dt", type=float, default=0.1)
-    parser.add_argument("--ego-stop-speed-threshold", type=float, default=0.05)
-    parser.add_argument("--ego-stop-reset-sec", type=float, default=0.7)
-    parser.add_argument(
-        "--ego-reset-tracks-on-stop",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Reset tracker when the vehicle remains stopped long enough to cut accumulated drift",
-    )
     parser.add_argument("--safety-radius", type=float, default=1.0)
     parser.add_argument("--roi-x-min", type=float, default=2.5)
     parser.add_argument("--roi-x-max", type=float, default=15.0)
@@ -652,19 +767,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--ttc-low-speed-kph",
         type=float,
         default=10.0,
-        help="Suppress prediction-based TTC warnings at or below this ego speed in km/h",
+        help="Compatibility option; TTC level scaling is currently disabled",
     )
     parser.add_argument(
         "--ttc-perception-low-speed-kph",
         type=float,
         default=5.0,
-        help="Suppress perception/static-obstacle TTC warnings at or below this ego speed in km/h",
+        help="Compatibility option; TTC level scaling is currently disabled",
     )
     parser.add_argument(
         "--ttc-brake-threshold-scale",
         type=float,
         default=0.70,
-        help="Scale TTC warning thresholds while driver brake is pressed; lower is tighter",
+        help="Compatibility option; TTC level scaling is currently disabled",
     )
     parser.add_argument("--marker-topic", default="/adas/tracking_markers")
     parser.add_argument("--marker-frame", default=None)

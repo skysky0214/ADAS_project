@@ -23,6 +23,8 @@ class DetectedObject:
     dy: float | None = None
     dz: float | None = None
     heading: float | None = None
+    point_max_distance_m: float | None = None
+    point_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class PedestrianDetection:
     dy: float | None = None
     dz: float | None = None
     heading: float | None = None
+    point_max_distance_m: float | None = None
+    point_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,8 @@ class TrackedPedestrian:
     dy: float | None = None
     dz: float | None = None
     heading: float | None = None
+    point_max_distance_m: float | None = None
+    point_count: int | None = None
     history: List[HistoryPoint] = field(default_factory=list)
 
 

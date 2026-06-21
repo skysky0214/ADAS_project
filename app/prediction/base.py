@@ -9,5 +9,10 @@ class PredictionModel(ABC):
     """Adapter boundary for any trajectory prediction model."""
 
     @abstractmethod
-    def predict(self, tracked_objects: list[TrackedPedestrian]) -> list[PredictedTrajectory]:
+    def predict(
+        self,
+        tracked_objects: list[TrackedPedestrian],
+        timestamp_sec: float | None = None,
+        ego_motion_delta: tuple[float, float, float] | None = None,
+    ) -> list[PredictedTrajectory]:
         """Convert tracked pedestrians into future trajectories."""

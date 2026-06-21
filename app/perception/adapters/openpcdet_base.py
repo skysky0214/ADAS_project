@@ -62,6 +62,60 @@ def _load_points_from_payload(frame: FrameInput) -> np.ndarray:
     return np.ascontiguousarray(points, dtype=np.float32)
 
 
+def _finite_positive(value: float) -> bool:
+    return np.isfinite(value) and value > 0.0
+
+
+def _points_in_box_footprint(
+    points: np.ndarray,
+    box: np.ndarray,
+) -> np.ndarray | None:
+    if points.size == 0:
+        return points[:, :3]
+
+    center_x, center_y = float(box[0]), float(box[1])
+    dx, dy, heading = float(box[3]), float(box[4]), float(box[6])
+    if not (_finite_positive(dx) and _finite_positive(dy) and np.isfinite(heading)):
+        return None
+
+    rel_x = points[:, 0] - center_x
+    rel_y = points[:, 1] - center_y
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    local_x = rel_x * cos_h + rel_y * sin_h
+    local_y = -rel_x * sin_h + rel_y * cos_h
+
+    mask = (np.abs(local_x) <= dx * 0.5) & (np.abs(local_y) <= dy * 0.5)
+    return points[mask, :3]
+
+
+def _max_pairwise_distance_m(points_xyz: np.ndarray) -> float | None:
+    point_count = points_xyz.shape[0]
+    if point_count == 0:
+        return None
+    if point_count == 1:
+        return 0.0
+
+    max_distance_sq = 0.0
+    chunk_size = 512
+    for start in range(0, point_count, chunk_size):
+        chunk = points_xyz[start : start + chunk_size]
+        diff = chunk[:, None, :] - points_xyz[None, :, :]
+        distance_sq = np.sum(diff * diff, axis=2)
+        max_distance_sq = max(max_distance_sq, float(np.max(distance_sq)))
+    return float(np.sqrt(max_distance_sq))
+
+
+def _point_spread_stats_in_box_footprint(
+    points: np.ndarray,
+    box: np.ndarray,
+) -> tuple[float | None, int | None]:
+    object_points = _points_in_box_footprint(points, box)
+    if object_points is None:
+        return None, None
+    return _max_pairwise_distance_m(object_points), int(object_points.shape[0])
+
+
 class OpenPCDetBasePerceptionModel(PerceptionModel):
     """Shared OpenPCDet adapter that converts point clouds into DetectedObject rows."""
 
@@ -106,6 +160,7 @@ class OpenPCDetBasePerceptionModel(PerceptionModel):
             class_idx = int(label_idx) - 1
             if class_idx < 0 or class_idx >= len(self.class_names):
                 continue
+            point_max_distance_m, point_count = _point_spread_stats_in_box_footprint(points, box)
             detections.append(
                 DetectedObject(
                     label=self.class_names[class_idx],
@@ -117,6 +172,8 @@ class OpenPCDetBasePerceptionModel(PerceptionModel):
                     dy=float(box[4]),
                     dz=float(box[5]),
                     heading=float(box[6]),
+                    point_max_distance_m=point_max_distance_m,
+                    point_count=point_count,
                 )
             )
         return detections

@@ -20,6 +20,8 @@ def write_detection_csv(rows: list[dict], csv_path: Path) -> None:
         "dx",
         "dy",
         "dz",
+        "point_max_distance_m",
+        "point_count",
         "heading",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:

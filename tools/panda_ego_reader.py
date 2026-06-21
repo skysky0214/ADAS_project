@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import select
 import signal
 import sys
 import time
@@ -37,8 +38,6 @@ class CanEgoState:
     brake_lights: bool = False
     seen_wheel_speeds: bool = False
     seen_steering: bool = False
-    stopped_since: float | None = None
-    stopped_reset_sent: bool = False
 
 
 def u16_le(dat: bytes, offset: int) -> int:
@@ -100,7 +99,7 @@ def update_can_state(state: CanEgoState, can_msgs, bus: int) -> None:
             state.brake_lights = bool(brake_light or state.brake_pressed)
 
 
-def integrate(state: CanEgoState, args: argparse.Namespace, dt: float, now: float) -> tuple[dict, bool]:
+def integrate(state: CanEgoState, args: argparse.Namespace, dt: float) -> dict:
     wheel_avg_kph = sum(state.wheel_speeds_kph) / 4.0
     direction = -1.0 if state.moving_backward else 1.0
     speed_mps = direction * wheel_avg_kph * KPH_TO_MS
@@ -108,6 +107,7 @@ def integrate(state: CanEgoState, args: argparse.Namespace, dt: float, now: floa
     steering_deg = state.mdps_steering_deg if args.angle_source == "mdps" else state.steering_sensor_deg
     if args.invert_steer:
         steering_deg *= -1.0
+    steering_deg -= args.steer_bias_deg
 
     road_angle_rad = math.radians(steering_deg) / max(args.steer_ratio, 1e-6)
     yaw_rate = speed_mps / max(args.wheelbase, 1e-6) * math.tan(road_angle_rad)
@@ -115,34 +115,23 @@ def integrate(state: CanEgoState, args: argparse.Namespace, dt: float, now: floa
     dx = speed_mps * math.cos(0.5 * dyaw) * dt
     dy = speed_mps * math.sin(0.5 * dyaw) * dt
 
-    stopped = abs(speed_mps) < args.stop_speed_threshold
-    reset = False
-    if stopped:
-        if state.stopped_since is None:
-            state.stopped_since = now
-        if not state.stopped_reset_sent and now - state.stopped_since >= args.stop_reset_sec:
-            reset = True
-            state.stopped_reset_sent = True
-    else:
-        state.stopped_since = None
-        state.stopped_reset_sent = False
-
-    return (
-        {
-            "dx_m": dx,
-            "dy_m": dy,
-            "dyaw_rad": dyaw,
-            "speed_mps": speed_mps,
-            "steering_deg": steering_deg,
-            "accelerator_pressed": state.accelerator_pressed,
-            "accelerator_pedal": state.accelerator_pedal,
-            "accelerator_pedal_raw": state.accelerator_pedal_raw,
-            "brake_pressed": state.brake_pressed,
-            "brake_lights": state.brake_lights,
-            "valid": state.seen_wheel_speeds or state.seen_steering,
-        },
-        reset,
-    )
+    return {
+        "dx_m": dx,
+        "dy_m": dy,
+        "dyaw_rad": dyaw,
+        "speed_mps": speed_mps,
+        "wheel_avg_kph": wheel_avg_kph,
+        "wheel_speeds_kph": state.wheel_speeds_kph,
+        "steering_deg": steering_deg,
+        "road_angle_rad": road_angle_rad,
+        "yaw_rate_radps": yaw_rate,
+        "accelerator_pressed": state.accelerator_pressed,
+        "accelerator_pedal": state.accelerator_pedal,
+        "accelerator_pedal_raw": state.accelerator_pedal_raw,
+        "brake_pressed": state.brake_pressed,
+        "brake_lights": state.brake_lights,
+        "valid": state.seen_wheel_speeds or state.seen_steering,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -153,13 +142,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-config", action="store_true")
     parser.add_argument("--wheelbase", type=float, default=2.900)
     parser.add_argument("--steer-ratio", type=float, default=DEFAULT_STEER_RATIO, help="Steering wheel angle / road wheel angle")
+    parser.add_argument(
+        "--steer-bias-deg",
+        type=float,
+        default=0.0,
+        help="Steering wheel angle bias in degrees to subtract after sign correction",
+    )
     parser.add_argument("--angle-source", choices=("sensor", "mdps"), default="sensor")
     parser.add_argument("--invert-steer", action="store_true")
     parser.add_argument("--max-dt", type=float, default=0.1)
-    parser.add_argument("--stop-speed-threshold", type=float, default=0.05)
-    parser.add_argument("--stop-reset-sec", type=float, default=0.7)
     parser.add_argument("--emit-hz", type=float, default=100.0)
+    parser.add_argument("--emit-raw-can", action="store_true", help="Emit raw CAN frames as RAW JSON lines")
     return parser
+
+
+def apply_runtime_controls(args: argparse.Namespace) -> None:
+    readable, _, _ = select.select([sys.stdin], [], [], 0.0)
+    if not readable:
+        return
+    line = sys.stdin.readline()
+    if not line:
+        return
+    line = line.strip()
+    if not line.startswith("CONTROL "):
+        return
+    try:
+        data = json.loads(line[len("CONTROL "):])
+    except json.JSONDecodeError:
+        return
+
+    if "steer_ratio" in data:
+        args.steer_ratio = float(data["steer_ratio"])
+    if "steer_bias_deg" in data:
+        args.steer_bias_deg = float(data["steer_bias_deg"])
+    if "wheelbase" in data:
+        args.wheelbase = float(data["wheelbase"])
+    if "invert_steer" in data:
+        args.invert_steer = bool(data["invert_steer"])
 
 
 def main() -> int:
@@ -196,33 +215,50 @@ def main() -> int:
         latest_accelerator_pressed = False
         latest_accelerator_pedal = 0.0
         latest_accelerator_pedal_raw = 0
+        latest_wheel_avg_kph = 0.0
+        latest_wheel_speeds_kph = [0.0, 0.0, 0.0, 0.0]
+        latest_road_angle_rad = 0.0
+        latest_yaw_rate_radps = 0.0
         latest_valid = False
 
         while not stop:
+            apply_runtime_controls(args)
             can_msgs = panda.can_recv()
             now = time.monotonic()
             if can_msgs:
                 update_can_state(state, can_msgs, args.bus)
+                if args.emit_raw_can:
+                    stamp = time.time()
+                    for addr, dat, bus in can_msgs:
+                        if bus != args.bus:
+                            continue
+                        print(
+                            "RAW "
+                            + json.dumps(
+                                {"ts": stamp, "address": addr, "bytes": dat.hex(), "bus": bus},
+                                separators=(",", ":"),
+                            ),
+                            flush=True,
+                        )
 
             dt = min(max(now - last_t, 0.0), args.max_dt)
             last_t = now
-            delta, reset = integrate(state, args, dt, now)
-            if reset:
-                pending_dx = 0.0
-                pending_dy = 0.0
-                pending_dyaw = 0.0
-            else:
-                pending_dx += delta["dx_m"]
-                pending_dy += delta["dy_m"]
-                pending_dyaw += delta["dyaw_rad"]
+            delta = integrate(state, args, dt)
+            pending_dx += delta["dx_m"]
+            pending_dy += delta["dy_m"]
+            pending_dyaw += delta["dyaw_rad"]
             latest_speed = delta["speed_mps"]
             latest_steering = delta["steering_deg"]
             latest_accelerator_pressed = delta["accelerator_pressed"]
             latest_accelerator_pedal = delta["accelerator_pedal"]
             latest_accelerator_pedal_raw = delta["accelerator_pedal_raw"]
+            latest_wheel_avg_kph = delta["wheel_avg_kph"]
+            latest_wheel_speeds_kph = delta["wheel_speeds_kph"]
+            latest_road_angle_rad = delta["road_angle_rad"]
+            latest_yaw_rate_radps = delta["yaw_rate_radps"]
             latest_valid = delta["valid"]
 
-            if reset or now - last_emit >= emit_dt:
+            if now - last_emit >= emit_dt:
                 print(
                     "EGO "
                     + json.dumps(
@@ -231,14 +267,21 @@ def main() -> int:
                             "dy_m": pending_dy,
                             "dyaw_rad": pending_dyaw,
                             "speed_mps": latest_speed,
+                            "wheel_avg_kph": latest_wheel_avg_kph,
+                            "wheel_speeds_kph": latest_wheel_speeds_kph,
                             "steering_deg": latest_steering,
+                            "road_angle_rad": latest_road_angle_rad,
+                            "yaw_rate_radps": latest_yaw_rate_radps,
+                            "steer_ratio": args.steer_ratio,
+                            "steer_bias_deg": args.steer_bias_deg,
+                            "wheelbase": args.wheelbase,
+                            "invert_steer": args.invert_steer,
                             "accelerator_pressed": latest_accelerator_pressed,
                             "accelerator_pedal": latest_accelerator_pedal,
                             "accelerator_pedal_raw": latest_accelerator_pedal_raw,
                             "brake_pressed": state.brake_pressed,
                             "brake_lights": state.brake_lights,
                             "valid": latest_valid,
-                            "reset": reset,
                         },
                         separators=(",", ":"),
                     ),

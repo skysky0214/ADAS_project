@@ -40,8 +40,6 @@ class CanEgoState:
     brake_lights: bool = False
     seen_wheel_speeds: bool = False
     seen_steering: bool = False
-    stopped_since: float | None = None
-    stopped_reset_sent: bool = False
 
 
 def u16_le(dat: bytes, offset: int) -> int:
@@ -146,23 +144,17 @@ class VehicleTopicsPublisher(Node):
 
         dt = min(max(now - self.last_t, 0.0), self.args.max_dt)
         self.last_t = now
-        delta, reset = self.integrate(dt, now)
-        if reset:
-            self.pending_dx = 0.0
-            self.pending_dy = 0.0
-            self.pending_dyaw = 0.0
-        else:
-            self.pending_dx += delta["dx_m"]
-            self.pending_dy += delta["dy_m"]
-            self.pending_dyaw += delta["dyaw_rad"]
+        delta = self.integrate(dt)
+        self.pending_dx += delta["dx_m"]
+        self.pending_dy += delta["dy_m"]
+        self.pending_dyaw += delta["dyaw_rad"]
 
-        if reset or now - self.last_ego_emit >= 1.0 / max(self.args.emit_hz, 1e-6):
+        if now - self.last_ego_emit >= 1.0 / max(self.args.emit_hz, 1e-6):
             payload = {
                 **delta,
                 "dx_m": self.pending_dx,
                 "dy_m": self.pending_dy,
                 "dyaw_rad": self.pending_dyaw,
-                "reset": reset,
             }
             self.ego_pub.publish(String(data=json.dumps(payload, separators=(",", ":"))))
             self.pending_dx = 0.0
@@ -170,45 +162,31 @@ class VehicleTopicsPublisher(Node):
             self.pending_dyaw = 0.0
             self.last_ego_emit = now
 
-    def integrate(self, dt: float, now: float) -> tuple[dict, bool]:
+    def integrate(self, dt: float) -> dict:
         state = self.state
         wheel_avg_kph = sum(state.wheel_speeds_kph) / 4.0
         speed_mps = (-1.0 if state.moving_backward else 1.0) * wheel_avg_kph * KPH_TO_MS
         steering_deg = state.mdps_steering_deg if self.args.angle_source == "mdps" else state.steering_sensor_deg
         if self.args.invert_steer:
             steering_deg *= -1.0
+        steering_deg -= self.args.steer_bias_deg
         road_angle_rad = math.radians(steering_deg) / max(self.args.steer_ratio, 1e-6)
         yaw_rate = speed_mps / max(self.args.wheelbase, 1e-6) * math.tan(road_angle_rad)
         dyaw = yaw_rate * dt
 
-        stopped = abs(speed_mps) < self.args.stop_speed_threshold
-        reset = False
-        if stopped:
-            if state.stopped_since is None:
-                state.stopped_since = now
-            if not state.stopped_reset_sent and now - state.stopped_since >= self.args.stop_reset_sec:
-                reset = True
-                state.stopped_reset_sent = True
-        else:
-            state.stopped_since = None
-            state.stopped_reset_sent = False
-
-        return (
-            {
-                "dx_m": speed_mps * math.cos(0.5 * dyaw) * dt,
-                "dy_m": speed_mps * math.sin(0.5 * dyaw) * dt,
-                "dyaw_rad": dyaw,
-                "speed_mps": speed_mps,
-                "steering_deg": steering_deg,
-                "accelerator_pressed": state.accelerator_pressed,
-                "accelerator_pedal": state.accelerator_pedal,
-                "accelerator_pedal_raw": state.accelerator_pedal_raw,
-                "brake_pressed": state.brake_pressed,
-                "brake_lights": state.brake_lights,
-                "valid": state.seen_wheel_speeds or state.seen_steering,
-            },
-            reset,
-        )
+        return {
+            "dx_m": speed_mps * math.cos(0.5 * dyaw) * dt,
+            "dy_m": speed_mps * math.sin(0.5 * dyaw) * dt,
+            "dyaw_rad": dyaw,
+            "speed_mps": speed_mps,
+            "steering_deg": steering_deg,
+            "accelerator_pressed": state.accelerator_pressed,
+            "accelerator_pedal": state.accelerator_pedal,
+            "accelerator_pedal_raw": state.accelerator_pedal_raw,
+            "brake_pressed": state.brake_pressed,
+            "brake_lights": state.brake_lights,
+            "valid": state.seen_wheel_speeds or state.seen_steering,
+        }
 
     def destroy_node(self) -> bool:
         try:
@@ -226,11 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-config", action="store_true")
     parser.add_argument("--wheelbase", type=float, default=2.900)
     parser.add_argument("--steer-ratio", type=float, default=DEFAULT_STEER_RATIO)
+    parser.add_argument(
+        "--steer-bias-deg",
+        type=float,
+        default=0.0,
+        help="Steering wheel angle bias in degrees to subtract after sign correction",
+    )
     parser.add_argument("--angle-source", choices=("sensor", "mdps"), default="sensor")
     parser.add_argument("--invert-steer", action="store_true")
     parser.add_argument("--max-dt", type=float, default=0.1)
-    parser.add_argument("--stop-speed-threshold", type=float, default=0.05)
-    parser.add_argument("--stop-reset-sec", type=float, default=0.7)
     parser.add_argument("--emit-hz", type=float, default=100.0)
     parser.add_argument("--ego-topic", default="/vehicle/ego_motion")
     parser.add_argument("--raw-topic", default="/vehicle/can/raw")

@@ -6,7 +6,7 @@ from pprint import pformat
 from app.core.config import PipelineConfig
 from app.core.domain_types import FrameInput, TrackingFrameResult
 from app.perception.base import PerceptionModel
-from app.perception.pedestrian_filter import filter_pedestrians
+from app.perception.pedestrian_filter import PedestrianPointSpreadFilter, filter_pedestrians
 from app.perception.placeholder import PlaceholderPerceptionModel
 from app.tracking.pedestrian_tracker import PedestrianTracker
 
@@ -21,6 +21,10 @@ class RealTimePedestrianTrackingPipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.detector = self._build_detector(config)
+        self.pedestrian_point_spread_filter = PedestrianPointSpreadFilter(
+            min_point_max_distance_m=config.pedestrian_min_point_max_distance_m,
+            max_point_max_distance_m=config.pedestrian_max_point_max_distance_m,
+        )
         self.tracker = PedestrianTracker(
             match_distance=config.tracker_match_distance,
             reconnect_distance=config.tracker_reconnect_distance,
@@ -30,7 +34,10 @@ class RealTimePedestrianTrackingPipeline:
 
     def step(self, frame: FrameInput) -> TrackingFrameResult:
         detections = self.detector.infer(frame)
-        pedestrian_detections = filter_pedestrians(detections)
+        pedestrian_detections = filter_pedestrians(
+            detections,
+            point_spread_filter=self.pedestrian_point_spread_filter,
+        )
         tracked_objects = self.tracker.update(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,

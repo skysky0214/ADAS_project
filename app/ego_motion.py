@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 KPH_TO_MS = 1000.0 / 3600.0
@@ -74,11 +75,11 @@ class PandaEgoMotionReader:
         configure_panda: bool,
         wheelbase_m: float,
         steer_ratio: float,
+        steer_bias_deg: float,
         angle_source: str,
         invert_steer: bool,
         max_dt_sec: float,
-        stop_speed_threshold_mps: float,
-        stop_reset_sec: float,
+        raw_can_callback: Callable[[dict], None] | None = None,
     ):
         self.bus = bus
         self.can_speed = can_speed
@@ -86,11 +87,11 @@ class PandaEgoMotionReader:
         self.configure_panda = configure_panda
         self.wheelbase_m = wheelbase_m
         self.steer_ratio = steer_ratio
+        self.steer_bias_deg = steer_bias_deg
         self.angle_source = angle_source
         self.invert_steer = invert_steer
         self.max_dt_sec = max_dt_sec
-        self.stop_speed_threshold_mps = stop_speed_threshold_mps
-        self.stop_reset_sec = stop_reset_sec
+        self.raw_can_callback = raw_can_callback
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -108,8 +109,6 @@ class PandaEgoMotionReader:
         self._latest_brake_lights = False
         self._has_sample = False
         self._reset_pending = False
-        self._stopped_since: float | None = None
-        self._stopped_reset_sent = False
         self._panda = None
         self._proc: subprocess.Popen | None = None
 
@@ -176,19 +175,19 @@ class PandaEgoMotionReader:
                 str(self.wheelbase_m),
                 "--steer-ratio",
                 str(self.steer_ratio),
+                "--steer-bias-deg",
+                str(self.steer_bias_deg),
                 "--angle-source",
                 self.angle_source,
                 "--max-dt",
                 str(self.max_dt_sec),
-                "--stop-speed-threshold",
-                str(self.stop_speed_threshold_mps),
-                "--stop-reset-sec",
-                str(self.stop_reset_sec),
             ]
             if not self.configure_panda:
                 cmd.append("--no-config")
             if self.invert_steer:
                 cmd.append("--invert-steer")
+            if self.raw_can_callback is not None:
+                cmd.append("--emit-raw-can")
 
             env = os.environ.copy()
             env["PYTHONPATH"] = str(openpilot_root)
@@ -214,6 +213,8 @@ class PandaEgoMotionReader:
                     break
                 elif line.startswith("EGO "):
                     self._apply_subprocess_delta(json.loads(line[4:]))
+                elif line.startswith("RAW ") and self.raw_can_callback is not None:
+                    self.raw_can_callback(json.loads(line[4:]))
 
             if not self._ready.is_set():
                 self._error = "Panda ego reader exited before becoming ready"
@@ -259,6 +260,7 @@ class PandaEgoMotionReader:
             steering_deg = can_state.steering_sensor_deg
         if self.invert_steer:
             steering_deg *= -1.0
+        steering_deg -= self.steer_bias_deg
 
         road_angle_rad = math.radians(steering_deg) / max(self.steer_ratio, 1e-6)
         yaw_rate = speed_mps / max(self.wheelbase_m, 1e-6) * math.tan(road_angle_rad)
@@ -266,27 +268,9 @@ class PandaEgoMotionReader:
         dx = speed_mps * math.cos(0.5 * dyaw) * dt
         dy = speed_mps * math.sin(0.5 * dyaw) * dt
 
-        stopped = abs(speed_mps) < self.stop_speed_threshold_mps
-        reset = False
-        if stopped:
-            if self._stopped_since is None:
-                self._stopped_since = now
-            if not self._stopped_reset_sent and now - self._stopped_since >= self.stop_reset_sec:
-                reset = True
-                self._stopped_reset_sent = True
-        else:
-            self._stopped_since = None
-            self._stopped_reset_sent = False
-
         with self._lock:
-            if reset:
-                self._pending_dx_m = 0.0
-                self._pending_dy_m = 0.0
-                self._pending_dyaw_rad = 0.0
-                self._reset_pending = True
-            else:
-                self._pending_dx_m += dx
-                self._pending_dy_m += dy
+            self._pending_dx_m += dx
+            self._pending_dy_m += dy
             self._pending_dyaw_rad += dyaw
             self._latest_speed_mps = speed_mps
             self._latest_steering_deg = steering_deg

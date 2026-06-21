@@ -21,7 +21,7 @@ from app.core.config import (
 from app.core.domain_types import FrameInput, TrackedPedestrian
 from app.perception.adapters.openpcdet_dsvt import OpenPCDetDSVTPerceptionModel
 from app.perception.adapters.openpcdet_pointpillar import OpenPCDetPointPillarPerceptionModel
-from app.perception.pedestrian_filter import filter_pedestrians
+from app.perception.pedestrian_filter import PedestrianPointSpreadFilter, filter_pedestrians
 from app.tracking.pedestrian_tracker import PedestrianTracker
 
 
@@ -48,6 +48,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pointpillar-checkpoint", type=Path, default=DEFAULT_POINTPILLAR_CHECKPOINT)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--score-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--pedestrian-min-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is smaller than this value in meters",
+    )
+    parser.add_argument(
+        "--pedestrian-max-point-max-distance",
+        type=float,
+        default=None,
+        help="Drop Pedestrian detections whose max point-to-point distance is larger than this value in meters",
+    )
     parser.add_argument("--ext", choices=[".npy", ".bin"], default=".npy")
     parser.add_argument("--fps", type=float, default=5.0)
     parser.add_argument("--max-frames", type=int, default=None)
@@ -216,6 +228,10 @@ def main() -> None:
         frame_paths = frame_paths[: args.max_frames]
 
     detector = build_detector(args)
+    pedestrian_point_spread_filter = PedestrianPointSpreadFilter(
+        min_point_max_distance_m=args.pedestrian_min_point_max_distance,
+        max_point_max_distance_m=args.pedestrian_max_point_max_distance,
+    )
     tracker = PedestrianTracker(
         match_distance=args.match_distance,
         reconnect_distance=args.reconnect_distance,
@@ -244,10 +260,14 @@ def main() -> None:
             payload={"points": points},
         )
         detections = detector.infer(frame)
+        pedestrian_detections = filter_pedestrians(
+            detections,
+            point_spread_filter=pedestrian_point_spread_filter,
+        )
         tracks = tracker.update(
             frame_id=frame.frame_id,
             timestamp_sec=frame.timestamp_sec,
-            detections=filter_pedestrians(detections),
+            detections=pedestrian_detections,
         )
 
         point_cloud.points = o3d.utility.Vector3dVector(points[:, :3])
@@ -278,7 +298,7 @@ def main() -> None:
 
         print(
             f"frame={frame_id} file={point_path.name} detections={len(detections)} "
-            f"pedestrians={len(filter_pedestrians(detections))} tracks={len(tracks)}"
+            f"pedestrians={len(pedestrian_detections)} tracks={len(tracks)}"
         )
 
         if frame_id == 0:

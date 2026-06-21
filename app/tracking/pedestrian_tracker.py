@@ -97,6 +97,8 @@ class PedestrianTracker:
                     dy=track.dy,
                     dz=track.dz,
                     heading=heading,
+                    point_max_distance_m=track.point_max_distance_m,
+                    point_count=track.point_count,
                     history=history,
                 )
             )
@@ -125,6 +127,8 @@ class PedestrianTracker:
                     dy=det.dy,
                     dz=det.dz,
                     heading=det.heading,
+                    point_max_distance_m=det.point_max_distance_m,
+                    point_count=det.point_count,
                     history=[
                         HistoryPoint(
                             frame_id=frame_id,
@@ -168,6 +172,8 @@ class PedestrianTracker:
                 dy=det.dy,
                 dz=det.dz,
                 heading=det.heading,
+                point_max_distance_m=det.point_max_distance_m,
+                point_count=det.point_count,
                 history=history,
             )
             updated[matched_id] = _TrackState(track=track)
@@ -192,6 +198,8 @@ class PedestrianTracker:
                         dy=state.track.dy,
                         dz=state.track.dz,
                         heading=state.track.heading,
+                        point_max_distance_m=state.track.point_max_distance_m,
+                        point_count=state.track.point_count,
                         history=state.track.history,
                     )
                 )

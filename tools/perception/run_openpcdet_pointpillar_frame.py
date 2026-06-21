@@ -38,7 +38,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def write_csv(rows: list[dict], output_csv: Path) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["label", "score", "x", "y", "z", "dx", "dy", "dz", "heading"]
+    fieldnames = [
+        "label",
+        "score",
+        "x",
+        "y",
+        "z",
+        "dx",
+        "dy",
+        "dz",
+        "point_max_distance_m",
+        "point_count",
+        "heading",
+    ]
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
