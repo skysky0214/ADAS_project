@@ -34,7 +34,9 @@ from app.control.ttc_warning import (
 )
 from app.core.domain_types import (
     FrameInput,
+    PredictedTrajectory,
     TrackingFrameResult,
+    TrackedPedestrian,
 )
 from app.io.artifacts import (
     prediction_rows,
@@ -53,11 +55,108 @@ from app.core.logging_utils import (
 from app.bridge.planner_interface import build_planner_snapshot
 from app.perception.pedestrian_filter import filter_pedestrians
 from app.pipeline import RealTimePedestrianTrackingPipeline
+from app.prediction.base import PredictionModel
 from app.prediction.input_builder import build_prediction_input
 from app.visualization.dashboard_client import DashboardPublisher
 from app.visualization.rviz_markers import build_tracking_marker_array
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+class PredictionHoldModel(PredictionModel):
+    """Keep recent predictions visible for active tracks through short output drops."""
+
+    def __init__(
+        self,
+        base_model: PredictionModel,
+        hold_frames: int,
+        confidence_decay: float,
+    ):
+        self.base_model = base_model
+        self.hold_frames = max(0, hold_frames)
+        self.confidence_decay = min(max(confidence_decay, 0.0), 1.0)
+        self.frame_index = 0
+        self._cache: dict[int, _HeldPrediction] = {}
+
+    def predict(
+        self,
+        tracked_objects: list[TrackedPedestrian],
+        timestamp_sec: float | None = None,
+        ego_motion_delta: tuple[float, float, float] | None = None,
+    ) -> list[PredictedTrajectory]:
+        self.frame_index += 1
+        fresh = self.base_model.predict(
+            tracked_objects,
+            timestamp_sec=timestamp_sec,
+            ego_motion_delta=ego_motion_delta,
+        )
+        fresh_by_id = {trajectory.track_id: trajectory for trajectory in fresh}
+        tracks_by_id = {track.track_id: track for track in tracked_objects}
+
+        for trajectory in fresh:
+            track = tracks_by_id.get(trajectory.track_id)
+            if track is None:
+                continue
+            self._cache[trajectory.track_id] = _HeldPrediction(
+                trajectory=trajectory,
+                anchor_x=float(track.x),
+                anchor_y=float(track.y),
+                frame_index=self.frame_index,
+            )
+
+        active_ids = set(tracks_by_id)
+        for track_id in list(self._cache):
+            if track_id not in active_ids:
+                del self._cache[track_id]
+
+        output = list(fresh)
+        for track_id, track in tracks_by_id.items():
+            if track_id in fresh_by_id:
+                continue
+            held = self._cache.get(track_id)
+            if held is None:
+                continue
+
+            age_frames = self.frame_index - held.frame_index
+            if age_frames > self.hold_frames:
+                continue
+
+            output.append(self._translate_held_prediction(track, held, age_frames))
+
+        return output
+
+    def _translate_held_prediction(
+        self,
+        track: TrackedPedestrian,
+        held: "_HeldPrediction",
+        age_frames: int,
+    ) -> PredictedTrajectory:
+        dx = float(track.x) - held.anchor_x
+        dy = float(track.y) - held.anchor_y
+        confidence = held.trajectory.confidence * (self.confidence_decay ** age_frames)
+        return replace(
+            held.trajectory,
+            points=[
+                replace(point, x=point.x + dx, y=point.y + dy)
+                for point in held.trajectory.points
+            ],
+            confidence=confidence,
+            model_name=f"{held.trajectory.model_name}+hold",
+        )
+
+
+class _HeldPrediction:
+    def __init__(
+        self,
+        trajectory: PredictedTrajectory,
+        anchor_x: float,
+        anchor_y: float,
+        frame_index: int,
+    ):
+        self.trajectory = trajectory
+        self.anchor_x = anchor_x
+        self.anchor_y = anchor_y
+        self.frame_index = frame_index
 
 
 class DSVTTrackingNode(Node):
@@ -466,6 +565,17 @@ class DSVTTrackingNode(Node):
                 max_pedestrian_speed=args.prediction_max_speed,
             )
             self.get_logger().info("SR-LSTM prediction model loaded.")
+            if args.prediction_hold:
+                self.get_logger().info(
+                    "Prediction hold enabled: "
+                    f"frames={args.prediction_hold_frames}, "
+                    f"confidence_decay={args.prediction_hold_confidence_decay:.2f}"
+                )
+                return PredictionHoldModel(
+                    base_model=model,
+                    hold_frames=args.prediction_hold_frames,
+                    confidence_decay=args.prediction_hold_confidence_decay,
+                )
             return model
         raise ValueError(f"Unknown prediction model: {args.prediction}")
 
@@ -693,6 +803,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prediction", choices=["none", "srlstm"], default="none")
     parser.add_argument("--prediction-fps", type=float, default=2.5)
     parser.add_argument(
+        "--prediction-hold",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep recent SR-LSTM predictions visible for active tracks through short output drops",
+    )
+    parser.add_argument(
+        "--prediction-hold-frames",
+        type=int,
+        default=8,
+        help="Maximum callback frames to keep a missing prediction visible",
+    )
+    parser.add_argument(
+        "--prediction-hold-confidence-decay",
+        type=float,
+        default=0.85,
+        help="Per-frame confidence multiplier for held predictions",
+    )
+    parser.add_argument(
         "--prediction-smooth-alpha",
         type=float,
         default=0.4,
@@ -753,7 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vehicle-front",
         type=float,
-        default=2.40,
+        default=3.50,
         help="Forward vehicle footprint from LiDAR origin in meters",
     )
     parser.add_argument(
