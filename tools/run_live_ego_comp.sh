@@ -39,7 +39,7 @@ export LD_LIBRARY_PATH="$TORCH_LIB:${LD_LIBRARY_PATH:-}"
 python app/main.py \
   --topic /lidar_points \
   --perception pointpillar \
-  --score-threshold 0.29 \
+  --score-threshold 0.ㅃ \
   "${PEDESTRIAN_POINT_SPREAD_ARGS[@]}" \
   --prediction srlstm \
   --prediction-fps 2.5 \
@@ -47,10 +47,10 @@ python app/main.py \
   --ego-compensation \
   --ego-can-bus 0 \
   --ego-steer-bias-deg "$EGO_STEER_BIAS_DEG" \
-  --safety-radius 1.0 \
-  --vehicle-front 2.40 \
+  --safety-radius 0.7 \
+  --vehicle-front 3.5 \
   --vehicle-rear 2.10 \
-  --vehicle-side 1.00 \
+  --vehicle-side 0.80 \
   --marker-frame hesai_lidar \
   --dashboard-url "${ADAS_DASHBOARD_URL:-http://localhost:8000/api/frame}" \
   --output-dir artifacts/live_ego_comp \

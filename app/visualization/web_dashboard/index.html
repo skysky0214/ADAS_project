@@ -112,7 +112,7 @@
                             </div>
                         </div>
                         <div class="audio-toggle-container">
-                            <button id="btn-audio-toggle" class="btn btn-secondary btn-audio-off">🔊 AUDIO: ON</button>
+                            <button id="btn-audio-toggle" class="btn btn-secondary btn-audio-off">🔊 AUDIO: ENABLE</button>
                         </div>
                     </div>
                 </div>
@@ -188,44 +188,6 @@
                 </div>
             </section>
         </main>
-
-        <!-- BOTTOM PANEL: PLAYBACK / SIMULATION CONTROLS -->
-        <footer class="playback-panel glass-panel">
-            <div class="control-row">
-                <!-- FILE LOADER -->
-                <div class="file-uploader" id="drop-zone">
-                    <span class="upload-icon">📂</span>
-                    <span class="upload-text">드래그 & 드롭하여 JSON 로그 시연 (tracking/prediction/ttc_warnings)</span>
-                    <input type="file" id="file-selector" multiple style="display:none;" accept=".json,.csv">
-                    <button class="btn btn-primary" id="btn-browse">파일 선택</button>
-                </div>
-
-                <!-- PLAYBACK SYSTEM -->
-                <div class="playback-controls">
-                    <button class="btn btn-control" id="btn-play-pause" disabled>▶ PLAY</button>
-                    <button class="btn btn-control" id="btn-stop" disabled>■ STOP</button>
-                    <div class="timeline-container">
-                        <input type="range" id="timeline-slider" min="0" max="100" value="0" disabled>
-                        <div class="timeline-labels">
-                            <span id="time-current">00:00</span>
-                            <span id="time-total">00:00</span>
-                        </div>
-                    </div>
-                    <div class="playback-speed">
-                        <label for="speed-select">SPEED:</label>
-                        <select id="speed-select" disabled>
-                            <option value="0.5">0.5x</option>
-                            <option value="1.0" selected>1.0x (Live Rate)</option>
-                            <option value="2.0">2.0x</option>
-                            <option value="5.0">5.0x</option>
-                        </select>
-                    </div>
-                </div>
-            </div>
-            <div class="loaded-files-status" id="loaded-status">
-                <span class="badge badge-error">Offline Mode</span> 대기 중: 로컬 <code>web_server.py</code>를 실행하여 라이브로 수신하거나, 기존 artifacts JSON 파일을 업로드하세요.
-            </div>
-        </footer>
     </div>
 
     <!-- Main Logic script -->

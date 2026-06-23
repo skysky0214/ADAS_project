@@ -89,3 +89,14 @@ def test_ttc_levels_do_not_scale_with_speed_or_driver_brake() -> None:
     assert adapter.classify_warning(1.6)["level"] == 1
     assert adapter.classify_warning(1.0)["level"] == 2
     assert adapter.classify_warning(0.75)["level"] == 3
+
+
+def test_target_deceleration_scales_with_ego_speed_and_only_brake_levels() -> None:
+    fast = _adapter(speed_mps=10.0)
+    slow = _adapter(speed_mps=2.0)
+    stopped = _adapter(speed_mps=0.0)
+
+    assert fast.target_deceleration(1.6) == 0.0
+    assert fast.target_deceleration(1.0) == pytest.approx(-8.0)
+    assert slow.target_deceleration(1.0) == pytest.approx(-2.0)
+    assert stopped.target_deceleration(1.0) == 0.0

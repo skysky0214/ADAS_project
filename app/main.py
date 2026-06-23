@@ -870,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ego-angle-source", choices=("sensor", "mdps"), default="sensor")
     parser.add_argument("--ego-invert-steer", action="store_true")
     parser.add_argument("--ego-max-dt", type=float, default=0.1)
-    parser.add_argument("--safety-radius", type=float, default=1.0)
+    parser.add_argument("--safety-radius", type=float, default=0.7)
     parser.add_argument("--roi-x-min", type=float, default=2.5)
     parser.add_argument("--roi-x-max", type=float, default=15.0)
     parser.add_argument("--roi-y-min", type=float, default=-1.1)
@@ -890,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.10,
         help="Rearward vehicle footprint from LiDAR origin in meters",
     )
-    parser.add_argument("--vehicle-side", type=float, default=1.00, help="Lateral vehicle footprint from LiDAR origin in meters")
+    parser.add_argument("--vehicle-side", type=float, default=1.0, help="Lateral vehicle footprint from LiDAR origin in meters")
     parser.add_argument(
         "--ttc-low-speed-kph",
         type=float,

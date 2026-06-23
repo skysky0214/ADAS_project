@@ -113,7 +113,7 @@ class TTCWarningAdapter:
             ttc_result = self.compute_ttc(track, trajectory_points)
             warning_info = self.classify_warning(ttc_result.min_ttc_sec)
             normal_warning_info = self.classify_warning_normal(ttc_result.min_ttc_sec)
-            accel = self.s_curve_deceleration(ttc_result.min_ttc_sec)
+            accel = self.target_deceleration(ttc_result.min_ttc_sec)
             collision_time_sec = (
                 timestamp_sec + ttc_result.min_ttc_sec
                 if math.isfinite(ttc_result.min_ttc_sec)
@@ -296,7 +296,7 @@ class TTCWarningAdapter:
         if warning_info["level"] == 0 and normal_warning_info["level"] == 0:
             return None
 
-        accel = self.s_curve_deceleration(observation.ttc_sec)
+        accel = self.target_deceleration(observation.ttc_sec)
         return TTCWarning(
             frame_id=observation.frame_id,
             timestamp_sec=observation.timestamp_sec,
@@ -528,18 +528,19 @@ class TTCWarningAdapter:
             return max(dx, dy)
         return outside_distance
 
-    def s_curve_deceleration(self, ttc_sec: float) -> float:
+    def target_deceleration(self, ttc_sec: float) -> float:
         config = self.config
-        level1_ttc_sec, _, level3_ttc_sec = self._active_thresholds()
-        if math.isinf(ttc_sec) or ttc_sec > level1_ttc_sec:
+        _, level2_ttc_sec, _ = self._active_thresholds()
+        speed_mps = abs(config.ego_speed_mps)
+        if math.isinf(ttc_sec) or ttc_sec > level2_ttc_sec or speed_mps <= 1e-3:
             return 0.0
 
-        ttc_mid = (level1_ttc_sec + level3_ttc_sec) / 2.0
-        k = 5.0
-        sigmoid = 1.0 / (1.0 + math.exp(k * (ttc_sec - ttc_mid)))
-        accel_cmd = config.max_decel_mps2 * sigmoid
+        accel_cmd = -speed_mps / max(ttc_sec, 0.1)
         accel_cmd = max(accel_cmd, config.max_decel_mps2)
         return round(accel_cmd, 3)
+
+    def s_curve_deceleration(self, ttc_sec: float) -> float:
+        return self.target_deceleration(ttc_sec)
 
     def classify_warning(self, ttc_sec: float) -> dict:
         return self._classify_warning_with_thresholds(ttc_sec, self._active_thresholds())

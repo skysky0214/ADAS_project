@@ -125,13 +125,20 @@ def build_tracking_marker_array(
             warning_marker.pose.position.x = float(track.x)
             warning_marker.pose.position.y = float(track.y)
             warning_marker.pose.position.z = float(track.z + (track.dz or 1.7) + 1.0)
-            warning_marker.scale.z = 0.65
+            warning_marker.scale.z = _warning_text_scale(warning.level)
             warning_marker.text = (
                 f"L{warning.level} TTC {_format_ttc(warning.min_ttc_sec)} "
                 f"a={warning.target_accel_mps2:.1f}"
             )
             _set_marker_color(warning_marker, _warning_level_rgba(warning.level))
             marker_array.markers.append(warning_marker)
+            if warning.level >= 1:
+                _append_bold_text_copies(
+                    marker_array,
+                    warning_marker,
+                    namespace="ttc_warnings_bold",
+                    marker_id=80_000 + track.track_id * 10,
+                )
 
             normal_marker = _base_marker(
                 frame_id,
@@ -165,7 +172,7 @@ def build_tracking_marker_array(
             text_marker.pose.position.x = marker_x
             text_marker.pose.position.y = marker_y
             text_marker.pose.position.z = marker_z
-            text_marker.scale.z = 0.7
+            text_marker.scale.z = _warning_text_scale(max(warning.level, warning.normal_level))
             text_marker.text = (
                 f"[STATIC] L{warning.level} BASE L{warning.normal_level} "
                 f"TTC {_format_ttc(warning.min_ttc_sec)} "
@@ -173,6 +180,13 @@ def build_tracking_marker_array(
             )
             _set_marker_color(text_marker, _warning_level_rgba(max(warning.level, warning.normal_level)))
             marker_array.markers.append(text_marker)
+            if max(warning.level, warning.normal_level) >= 1:
+                _append_bold_text_copies(
+                    marker_array,
+                    text_marker,
+                    namespace="static_ttc_warnings_bold",
+                    marker_id=90_000,
+                )
 
             # CUBE marker to highlight the static obstacle warning zone
             box_marker = _base_marker(
@@ -211,6 +225,41 @@ def _format_ttc(ttc_sec: float) -> str:
     if not math.isfinite(ttc_sec):
         return "inf"
     return f"{ttc_sec:.2f}s"
+
+
+def _warning_text_scale(level: int) -> float:
+    if level >= 3:
+        return 1.15
+    if level == 2:
+        return 1.00
+    if level == 1:
+        return 0.85
+    return 0.65
+
+
+def _append_bold_text_copies(
+    marker_array: MarkerArray,
+    source: Marker,
+    namespace: str,
+    marker_id: int,
+) -> None:
+    offsets = ((0.035, 0.0), (-0.035, 0.0), (0.0, 0.035), (0.0, -0.035))
+    for index, (dx, dy) in enumerate(offsets):
+        copy = Marker()
+        copy.header.frame_id = source.header.frame_id
+        copy.header.stamp = source.header.stamp
+        copy.ns = namespace
+        copy.id = marker_id + index
+        copy.type = source.type
+        copy.action = source.action
+        copy.pose.position.x = source.pose.position.x + dx
+        copy.pose.position.y = source.pose.position.y + dy
+        copy.pose.position.z = source.pose.position.z
+        copy.pose.orientation = source.pose.orientation
+        copy.scale = source.scale
+        copy.color = source.color
+        copy.text = source.text
+        marker_array.markers.append(copy)
 
 
 def _warning_level_rgba(level: int) -> tuple[float, float, float, float]:

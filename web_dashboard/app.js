@@ -25,6 +25,7 @@ let appState = {
     // Data Buffers
     frames: [], // Replay Mode: combined frames
     latestLiveFrame: null,
+    latestLiveFrameWallMs: 0,
     liveStreamSource: null,
     roiDirty: false,
     roiApplyPending: false,
@@ -32,6 +33,7 @@ let appState = {
 
     // Audio Context for direct warning synthesis
     audioCtx: null,
+    audioUnlocked: false,
     lastAudioWarningTime: 0,
     activeWarningSound: 0 // 0: None, 1: Level 1, 2: Level 2, 3: Level 3
 };
@@ -96,6 +98,7 @@ const el = {
 
 // Canvas context
 let ctx = el.radarCanvas.getContext("2d");
+const LIVE_FRAME_STALE_MS = 1000;
 
 // Scale mapping configuration
 const RADAR_SCALE = 12; // 1 meter = 12 pixels
@@ -107,6 +110,7 @@ appState.bevScale = RADAR_SCALE;
 window.addEventListener("DOMContentLoaded", () => {
     initCanvas();
     setupEventListeners();
+    updateAudioToggleUI();
     loadRuntimeRoiConfig();
     setupLiveSSE();
 
@@ -136,13 +140,53 @@ function initAudio() {
     if (!appState.audioCtx) {
         appState.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
+    return appState.audioCtx;
+}
+
+function resumeAudioFromUserGesture() {
+    if (!appState.audioEnabled) return;
+    const audioCtx = initAudio();
+    if (audioCtx.state === "suspended") {
+        audioCtx.resume()
+            .then(() => {
+                appState.audioUnlocked = true;
+                updateAudioToggleUI();
+            })
+            .catch((e) => console.error("Audio resume error:", e));
+        return;
+    }
+    appState.audioUnlocked = true;
+    updateAudioToggleUI();
+}
+
+function updateAudioToggleUI() {
+    if (appState.audioEnabled && appState.audioUnlocked) {
+        el.btnAudioToggle.textContent = "🔊 AUDIO: ON";
+        el.btnAudioToggle.className = "btn btn-secondary btn-audio-on";
+    } else if (appState.audioEnabled) {
+        el.btnAudioToggle.textContent = "🔊 AUDIO: ENABLE";
+        el.btnAudioToggle.className = "btn btn-secondary btn-audio-off";
+    } else {
+        el.btnAudioToggle.textContent = "🔇 AUDIO: OFF";
+        el.btnAudioToggle.className = "btn btn-secondary btn-audio-off";
+    }
 }
 
 function playWarningBeep(level) {
     if (!appState.audioEnabled) return;
-    initAudio();
+    const audioCtx = initAudio();
+    if (audioCtx.state === "suspended") {
+        audioCtx.resume()
+            .then(() => {
+                appState.audioUnlocked = true;
+                updateAudioToggleUI();
+                playWarningBeep(level);
+            })
+            .catch((e) => console.error("Audio resume error:", e));
+        return;
+    }
+    appState.audioUnlocked = true;
 
-    const now = appState.audioCtx.currentTime;
     // Throttle audio triggers to avoid overlapping beeps
     const throttleTime = level === 3 ? 150 : (level === 2 ? 400 : 800);
     const timeSinceLast = Date.now() - appState.lastAudioWarningTime;
@@ -189,46 +233,57 @@ function beep(frequency, duration, volume) {
 
 // Setup static and dynamic interaction handlers
 function setupEventListeners() {
+    window.addEventListener("pointerdown", resumeAudioFromUserGesture, { once: true });
+    window.addEventListener("keydown", resumeAudioFromUserGesture, { once: true });
+
     // Audio toggling
     el.btnAudioToggle.addEventListener("click", () => {
-        appState.audioEnabled = !appState.audioEnabled;
-        if (appState.audioEnabled) {
-            el.btnAudioToggle.textContent = "🔊 AUDIO: ON";
-            el.btnAudioToggle.className = "btn btn-secondary btn-audio-on";
-            initAudio();
-        } else {
-            el.btnAudioToggle.textContent = "🔇 AUDIO: OFF";
-            el.btnAudioToggle.className = "btn btn-secondary btn-audio-off";
+        if (appState.audioEnabled && !appState.audioUnlocked) {
+            resumeAudioFromUserGesture();
+            return;
         }
+        appState.audioEnabled = !appState.audioEnabled;
+        updateAudioToggleUI();
+        resumeAudioFromUserGesture();
     });
 
     // File selection UI trigger
-    el.btnBrowse.addEventListener("click", () => el.fileSelector.click());
-    el.fileSelector.addEventListener("change", handleFileSelection);
+    if (el.btnBrowse && el.fileSelector) {
+        el.btnBrowse.addEventListener("click", () => el.fileSelector.click());
+        el.fileSelector.addEventListener("change", handleFileSelection);
+    }
 
     // Timeline Slider Change
-    el.timelineSlider.addEventListener("input", (e) => {
-        const frameIdx = parseInt(e.target.value);
-        if (appState.frames.length > 0 && frameIdx < appState.frames.length) {
-            appState.currentFrameIndex = frameIdx;
-            renderFrame(appState.frames[frameIdx]);
-        }
-    });
+    if (el.timelineSlider) {
+        el.timelineSlider.addEventListener("input", (e) => {
+            const frameIdx = parseInt(e.target.value);
+            if (appState.frames.length > 0 && frameIdx < appState.frames.length) {
+                appState.currentFrameIndex = frameIdx;
+                renderFrame(appState.frames[frameIdx]);
+            }
+        });
+    }
 
     // Playback buttons
-    el.btnPlayPause.addEventListener("click", () => {
-        if (appState.isPlaying) {
-            pausePlayback();
-        } else {
-            startPlayback();
-        }
-    });
+    if (el.btnPlayPause) {
+        el.btnPlayPause.addEventListener("click", () => {
+            if (appState.isPlaying) {
+                pausePlayback();
+            } else {
+                startPlayback();
+            }
+        });
+    }
 
-    el.btnStop.addEventListener("click", stopPlayback);
+    if (el.btnStop) {
+        el.btnStop.addEventListener("click", stopPlayback);
+    }
 
-    el.speedSelect.addEventListener("change", (e) => {
-        appState.playbackSpeed = parseFloat(e.target.value);
-    });
+    if (el.speedSelect) {
+        el.speedSelect.addEventListener("change", (e) => {
+            appState.playbackSpeed = parseFloat(e.target.value);
+        });
+    }
 
     roiEditableElements().forEach((control) => {
         control.addEventListener("input", () => {
@@ -242,22 +297,24 @@ function setupEventListeners() {
     }
 
     // Drag and Drop files
-    el.dropZone.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        el.dropZone.classList.add("dragover");
-    });
+    if (el.dropZone) {
+        el.dropZone.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            el.dropZone.classList.add("dragover");
+        });
 
-    el.dropZone.addEventListener("dragleave", () => {
-        el.dropZone.classList.remove("dragover");
-    });
+        el.dropZone.addEventListener("dragleave", () => {
+            el.dropZone.classList.remove("dragover");
+        });
 
-    el.dropZone.addEventListener("drop", (e) => {
-        e.preventDefault();
-        el.dropZone.classList.remove("dragover");
-        if (e.dataTransfer.files.length > 0) {
-            processDroppedFiles(e.dataTransfer.files);
-        }
-    });
+        el.dropZone.addEventListener("drop", (e) => {
+            e.preventDefault();
+            el.dropZone.classList.remove("dragover");
+            if (e.dataTransfer.files.length > 0) {
+                processDroppedFiles(e.dataTransfer.files);
+            }
+        });
+    }
 }
 
 async function loadRuntimeRoiConfig() {
@@ -426,6 +483,7 @@ function setupLiveSSE() {
             try {
                 const frameData = JSON.parse(event.data);
                 appState.latestLiveFrame = frameData;
+                appState.latestLiveFrameWallMs = performance.now();
                 renderFrame(frameData);
             } catch (e) {
                 console.error("Error parsing live stream event:", e);
@@ -438,6 +496,8 @@ function setupLiveSSE() {
                 console.log("Live stream server disconnected. Waiting for connection...");
                 appState.mode = "OFFLINE";
                 updateStatusUI();
+                resetWarningUI();
+                drawRadar({ tracks: [], trajectories: [], warnings: [] });
             }
         };
     } catch (err) {
@@ -449,31 +509,37 @@ function updateStatusUI() {
     if (appState.mode === "LIVE") {
         el.systemStatus.className = "status-badge status-live";
         el.systemStatus.textContent = "LIVE STREAMING";
-        el.loadedStatus.innerHTML = `<span class="badge badge-success">Live Mode</span> 실시간 ADAS 노드에 연결되었습니다. <code>main.py</code> 파이프라인 데이터가 렌더링 중입니다.`;
+        if (el.loadedStatus) {
+            el.loadedStatus.innerHTML = `<span class="badge badge-success">Live Mode</span> 실시간 ADAS 노드에 연결되었습니다. <code>main.py</code> 파이프라인 데이터가 렌더링 중입니다.`;
+        }
 
         // Disable replay controls during live stream
-        el.btnPlayPause.disabled = true;
-        el.btnStop.disabled = true;
-        el.timelineSlider.disabled = true;
-        el.speedSelect.disabled = true;
+        if (el.btnPlayPause) el.btnPlayPause.disabled = true;
+        if (el.btnStop) el.btnStop.disabled = true;
+        if (el.timelineSlider) el.timelineSlider.disabled = true;
+        if (el.speedSelect) el.speedSelect.disabled = true;
     } else if (appState.mode === "REPLAY") {
         el.systemStatus.className = "status-badge status-replay";
         el.systemStatus.textContent = "REPLAY PLAYING";
-        el.loadedStatus.innerHTML = `<span class="badge badge-success">Replay Mode</span> ${appState.frames.length} 프레임 데이터 로딩 완료. 시뮬레이션 제어 가능.`;
+        if (el.loadedStatus) {
+            el.loadedStatus.innerHTML = `<span class="badge badge-success">Replay Mode</span> ${appState.frames.length} 프레임 데이터 로딩 완료. 시뮬레이션 제어 가능.`;
+        }
 
-        el.btnPlayPause.disabled = false;
-        el.btnStop.disabled = false;
-        el.timelineSlider.disabled = false;
-        el.speedSelect.disabled = false;
+        if (el.btnPlayPause) el.btnPlayPause.disabled = false;
+        if (el.btnStop) el.btnStop.disabled = false;
+        if (el.timelineSlider) el.timelineSlider.disabled = false;
+        if (el.speedSelect) el.speedSelect.disabled = false;
     } else {
         el.systemStatus.className = "status-badge status-offline";
         el.systemStatus.textContent = "OFFLINE";
-        el.loadedStatus.innerHTML = `<span class="badge badge-error">Offline Mode</span> 대기 중: 로컬 <code>web_server.py</code>를 실행하거나 artifacts 로그를 업로드하세요.`;
+        if (el.loadedStatus) {
+            el.loadedStatus.innerHTML = `<span class="badge badge-error">Offline Mode</span> 대기 중: 로컬 <code>web_server.py</code>를 실행하거나 artifacts 로그를 업로드하세요.`;
+        }
 
-        el.btnPlayPause.disabled = true;
-        el.btnStop.disabled = true;
-        el.timelineSlider.disabled = true;
-        el.speedSelect.disabled = true;
+        if (el.btnPlayPause) el.btnPlayPause.disabled = true;
+        if (el.btnStop) el.btnStop.disabled = true;
+        if (el.timelineSlider) el.timelineSlider.disabled = true;
+        if (el.speedSelect) el.speedSelect.disabled = true;
     }
 }
 
@@ -621,13 +687,15 @@ function combineDataToFrames(data) {
     appState.mode = "REPLAY";
 
     // UI Slider configuration
-    el.timelineSlider.max = frames.length - 1;
-    el.timelineSlider.value = 0;
+    if (el.timelineSlider) {
+        el.timelineSlider.max = frames.length - 1;
+        el.timelineSlider.value = 0;
+    }
 
     // Update timeline timer displays
     const duration = frames[frames.length - 1].timestamp_sec - frames[0].timestamp_sec;
-    el.timeTotal.textContent = formatDuration(duration);
-    el.timeCurrent.textContent = "00:00";
+    if (el.timeTotal) el.timeTotal.textContent = formatDuration(duration);
+    if (el.timeCurrent) el.timeCurrent.textContent = "00:00";
 
     updateStatusUI();
     renderFrame(frames[0]);
@@ -697,7 +765,7 @@ function renderFrame(frame) {
     el.instBrakeValue.textContent = frame.ego_brake_lights ? "lights on" : "lights off";
 
     // Find active warnings
-    const warnings = frame.warnings || [];
+    const warnings = activeWarnings(frame.warnings);
     const maxWarning = warnings.length > 0 ? warnings.reduce((prev, curr) => (prev.level > curr.level) ? prev : curr) : null;
 
     let warningLevel = 0;
@@ -708,7 +776,7 @@ function renderFrame(frame) {
 
     if (maxWarning) {
         warningLevel = maxWarning.level;
-        targetDecel = maxWarning.target_accel_mps2 || 0.0;
+        targetDecel = displayDecelForWarning(maxWarning);
 
         // 가장 위험한 보행자의 TTC/거리 정보
         const ttcStr = (maxWarning.min_ttc_sec !== undefined && isFinite(maxWarning.min_ttc_sec) && maxWarning.min_ttc_sec < 90)
@@ -777,6 +845,7 @@ function translateAction(action) {
 }
 
 function updateTelemetryList(tracks, warnings) {
+    warnings = activeWarnings(warnings);
     if (tracks.length === 0) {
         el.trackList.innerHTML = `<div class="no-tracks">인식된 보행자 없음</div>`;
         return;
@@ -865,7 +934,7 @@ function drawRadar(frame) {
 
     // 5. Draw Pedestrians, past tracks, and predicted paths
     const tracks = frame.tracks || [];
-    const warnings = frame.warnings || [];
+    const warnings = activeWarnings(frame.warnings);
     const trajectories = frame.trajectories || [];
 
     const warningByTrack = {};
@@ -975,6 +1044,29 @@ function drawRadar(frame) {
     });
 
     drawCanvasStatus(frame);
+}
+
+function activeWarnings(warnings) {
+    return (warnings || []).filter(w => Number(w.level || 0) > 0);
+}
+
+function displayDecelForWarning(warning) {
+    const level = Number(warning?.level || 0);
+    if (level < 2) return 0.0;
+    const accel = Number(warning?.target_accel_mps2);
+    return Number.isFinite(accel) ? accel : 0.0;
+}
+
+function resetWarningUI() {
+    appState.latestLiveFrame = null;
+    appState.latestLiveFrameWallMs = 0;
+    el.instDecel.innerHTML = `0.00 <span class="unit">m/s²</span>`;
+    el.decelBar.style.width = "0%";
+    el.warningBanner.className = "warning-banner banner-safe";
+    el.warnTitle.textContent = "SYSTEM SAFE";
+    el.warnAction.textContent = "보행자 감지 없음 (정상 주행)";
+    el.emergencyGlow.className = "glow-safe";
+    updateTelemetryList([], []);
 }
 
 function drawStaticObstacleCluster(obstacle) {
@@ -1424,21 +1516,29 @@ function animationLoop(timestamp) {
         if (newIdx >= appState.frames.length) {
             newIdx = 0;
             appState.isPlaying = false;
-            el.btnPlayPause.textContent = "▶ PLAY";
+            if (el.btnPlayPause) el.btnPlayPause.textContent = "▶ PLAY";
         }
 
         appState.currentFrameIndex = Math.floor(newIdx);
-        el.timelineSlider.value = appState.currentFrameIndex;
+        if (el.timelineSlider) el.timelineSlider.value = appState.currentFrameIndex;
 
         const currentFrame = appState.frames[appState.currentFrameIndex];
         const elapsed = currentFrame.timestamp_sec - appState.frames[0].timestamp_sec;
-        el.timeCurrent.textContent = formatDuration(elapsed);
+        if (el.timeCurrent) el.timeCurrent.textContent = formatDuration(elapsed);
 
         renderFrame(currentFrame);
     } else {
         appState.lastAnimTime = timestamp;
         if (appState.mode === "LIVE") {
-            if (appState.latestLiveFrame) drawRadar(appState.latestLiveFrame);
+            if (
+                appState.latestLiveFrame &&
+                timestamp - appState.latestLiveFrameWallMs <= LIVE_FRAME_STALE_MS
+            ) {
+                drawRadar(appState.latestLiveFrame);
+            } else if (appState.latestLiveFrame) {
+                resetWarningUI();
+                drawRadar({ tracks: [], trajectories: [], warnings: [] });
+            }
         } else if (appState.frames.length > 0) {
             drawRadar(appState.frames[appState.currentFrameIndex]);
         } else {
@@ -1453,20 +1553,20 @@ function startPlayback() {
     if (appState.frames.length === 0) return;
     appState.isPlaying = true;
     appState.lastAnimTime = performance.now();
-    el.btnPlayPause.textContent = "⏸ PAUSE";
+    if (el.btnPlayPause) el.btnPlayPause.textContent = "⏸ PAUSE";
 }
 
 function pausePlayback() {
     appState.isPlaying = false;
-    el.btnPlayPause.textContent = "▶ PLAY";
+    if (el.btnPlayPause) el.btnPlayPause.textContent = "▶ PLAY";
 }
 
 function stopPlayback() {
     appState.isPlaying = false;
     appState.currentFrameIndex = 0;
-    el.timelineSlider.value = 0;
-    el.timeCurrent.textContent = "00:00";
-    el.btnPlayPause.textContent = "▶ PLAY";
+    if (el.timelineSlider) el.timelineSlider.value = 0;
+    if (el.timeCurrent) el.timeCurrent.textContent = "00:00";
+    if (el.btnPlayPause) el.btnPlayPause.textContent = "▶ PLAY";
     if (appState.frames.length > 0) {
         renderFrame(appState.frames[0]);
     }

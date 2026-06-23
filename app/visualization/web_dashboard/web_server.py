@@ -84,8 +84,8 @@ class DashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
-        # Create a queue specifically for this connection
-        q = queue.Queue(maxsize=100)
+        # Keep only the newest frame per client so stale warnings cannot backlog.
+        q = queue.Queue(maxsize=1)
 
         with subscribers_lock:
             subscribers.append(q)
@@ -126,6 +126,11 @@ class DashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                 inactive = []
                 for q in subscribers:
                     try:
+                        while True:
+                            try:
+                                q.get_nowait()
+                            except queue.Empty:
+                                break
                         q.put_nowait(frame_json)
                     except queue.Full:
                         inactive.append(q)
